@@ -1,50 +1,37 @@
 #!/usr/bin/env bash
 # OpenList Toolkit - lightweight OpenList management script
-# Supports common Linux distributions and Termux.
+# Community project for Linux and Termux.
 
 set -u
 
-APP_NAME="OpenList Toolkit"
+TOOLKIT_VERSION="0.2"
 INSTALL_DIR="${OPENLIST_HOME:-$HOME/.openlist}"
 BIN_DIR="$INSTALL_DIR/bin"
 DATA_DIR="$INSTALL_DIR/data"
 CONFIG_DIR="$INSTALL_DIR/config"
 LOG_DIR="$INSTALL_DIR/logs"
 BINARY="$BIN_DIR/openlist"
-SERVICE_NAME="openlist"
-
-if command -v curl >/dev/null 2>&1; then
-  CURL="curl"
-elif command -v wget >/dev/null 2>&1; then
-  CURL="wget -qO-"
-else
-  echo "错误：需要 curl 或 wget。"
-  exit 1
-fi
 
 info() { echo -e "\033[36m[INFO]\033[0m $*"; }
 ok() { echo -e "\033[32m[ OK ]\033[0m $*"; }
 warn() { echo -e "\033[33m[WARN]\033[0m $*"; }
 err() { echo -e "\033[31m[ERR ]\033[0m $*"; }
-
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 get_arch() {
-  local a
-  a="$(uname -m)"
-  case "$a" in
+  case "$(uname -m)" in
     x86_64|amd64) echo "amd64" ;;
     aarch64|arm64) echo "arm64" ;;
-    armv7l|armv7) echo "armv7" ;;
-    armv6l|armv6) echo "armv6" ;;
+    armv7l|armv7) echo "arm-7" ;;
+    armv6l|armv6) echo "arm-6" ;;
     i386|i686) echo "386" ;;
-    *) echo "$a" ;;
+    *) echo "unsupported" ;;
   esac
 }
 
 get_os() {
-  if [ -n "${TERMUX_VERSION:-}" ] || [ -d "$PREFIX" ] && [[ "${PREFIX:-}" == *com.termux* ]]; then
-    echo "termux"
+  if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *com.termux* ]]; then
+    echo "android"
   elif [ -f /etc/os-release ]; then
     . /etc/os-release
     echo "${ID:-linux}"
@@ -59,51 +46,42 @@ ensure_dirs() {
 
 latest_version() {
   local url="https://api.github.com/repos/OpenListTeam/OpenList/releases/latest"
-  local json
+  local json=""
   if command_exists curl; then
-    json="$(curl -fsSL "$url" 2>/dev/null || true)"
-  else
+    json="$(curl -fsSL --retry 3 "$url" 2>/dev/null || true)"
+  elif command_exists wget; then
     json="$(wget -qO- "$url" 2>/dev/null || true)"
   fi
   printf '%s\n' "$json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1
 }
 
-installed_version() {
-  if [ -x "$BINARY" ]; then
-    "$BINARY" version 2>/dev/null | head -n1 || true
-  else
-    echo "未安装"
+is_running() {
+  local pid=""
+  if [ -f "$INSTALL_DIR/openlist.pid" ]; then
+    pid="$(cat "$INSTALL_DIR/openlist.pid" 2>/dev/null || true)"
   fi
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
 stop_process() {
+  local pid=""
   if [ -f "$INSTALL_DIR/openlist.pid" ]; then
-    local pid
     pid="$(cat "$INSTALL_DIR/openlist.pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      sleep 1
+  fi
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" 2>/dev/null || true
     fi
-    rm -f "$INSTALL_DIR/openlist.pid"
   fi
-
-  pkill -f "$BINARY server" 2>/dev/null || true
-}
-
-is_running() {
-  if [ -f "$INSTALL_DIR/openlist.pid" ]; then
-    local pid
-    pid="$(cat "$INSTALL_DIR/openlist.pid" 2>/dev/null || true)"
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
-  fi
-  return 1
+  rm -f "$INSTALL_DIR/openlist.pid"
 }
 
 start_openlist() {
   ensure_dirs
   if [ ! -x "$BINARY" ]; then
-    err "OpenList 尚未安装。"
+    err "OpenList 尚未安装，请先选择 1。"
     return 1
   fi
   if is_running; then
@@ -116,18 +94,20 @@ start_openlist() {
   echo "$pid" > "$INSTALL_DIR/openlist.pid"
   sleep 1
 
-  if kill -0 "$pid" 2>/dev/null; then
+  if is_running; then
     ok "OpenList 已启动，PID: $pid"
+    info "默认访问地址：http://服务器IP:5244"
   else
-    err "OpenList 启动失败，请查看日志。"
+    err "OpenList 启动失败，请选择 7 查看日志。"
+    rm -f "$INSTALL_DIR/openlist.pid"
     return 1
   fi
 }
 
 stop_openlist() {
   if ! is_running; then
-    warn "OpenList 当前没有运行。"
     rm -f "$INSTALL_DIR/openlist.pid"
+    warn "OpenList 当前没有运行。"
     return 0
   fi
   stop_process
@@ -136,42 +116,60 @@ stop_openlist() {
 
 install_openlist() {
   ensure_dirs
-  local arch os version url tmp
+
+  local arch os version target_os asset url tmp extracted
   arch="$(get_arch)"
   os="$(get_os)"
 
-  case "$arch" in
-    amd64|arm64|armv7|armv6|386) ;;
-    *) err "暂不支持的 CPU 架构：$arch"; return 1 ;;
-  esac
-
-  info "检测到系统：$os / $arch"
-  info "正在获取 OpenList 最新版本……"
-  version="$(latest_version)"
-  if [ -z "$version" ]; then
-    err "无法获取最新版本，请检查网络。"
+  if [ "$arch" = "unsupported" ]; then
+    err "暂不支持的 CPU 架构：$(uname -m)"
     return 1
   fi
 
-  # OpenList release asset naming: openlist-<os>-<arch>.tar.gz
-  local target_os="linux"
-  if [ "$os" = "termux" ]; then target_os="android"; fi
-  url="https://github.com/OpenListTeam/OpenList/releases/download/${version}/openlist-${target_os}-${arch}.tar.gz"
+  if [ "$os" = "android" ]; then
+    target_os="android"
+  else
+    target_os="linux"
+  fi
+
+  version="$(latest_version)"
+  if [ -z "$version" ]; then
+    err "无法获取 OpenList 最新版本，请检查网络。"
+    return 1
+  fi
+
+  # OpenList official release assets use arm-6/arm-7 naming for 32-bit ARM.
+  asset="openlist-${target_os}-${arch}.tar.gz"
+  url="https://github.com/OpenListTeam/OpenList/releases/download/${version}/${asset}"
   tmp="$(mktemp -d)"
 
-  info "下载 $version：$url"
+  info "系统：$os"
+  info "架构：$arch"
+  info "版本：$version"
+  info "下载：$asset"
+
   if command_exists curl; then
     if ! curl -fL --retry 3 "$url" -o "$tmp/openlist.tar.gz"; then
-      err "下载失败。"
+      err "下载失败：$url"
+      rm -rf "$tmp"
+      return 1
+    fi
+  elif command_exists wget; then
+    if ! wget -q --show-progress "$url" -O "$tmp/openlist.tar.gz"; then
+      err "下载失败：$url"
       rm -rf "$tmp"
       return 1
     fi
   else
-    if ! wget -q --show-progress "$url" -O "$tmp/openlist.tar.gz"; then
-      err "下载失败。"
-      rm -rf "$tmp"
-      return 1
-    fi
+    err "需要 curl 或 wget。"
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  if ! command_exists tar; then
+    err "未找到 tar，请先安装 tar。"
+    rm -rf "$tmp"
+    return 1
   fi
 
   if ! tar -xzf "$tmp/openlist.tar.gz" -C "$tmp"; then
@@ -180,13 +178,9 @@ install_openlist() {
     return 1
   fi
 
-  local extracted
-  extracted="$(find "$tmp" -type f -name 'openlist*' -perm -u+x 2>/dev/null | head -n1)"
+  extracted="$(find "$tmp" -type f -name 'openlist' | head -n1)"
   if [ -z "$extracted" ]; then
-    extracted="$(find "$tmp" -type f -name 'openlist*' 2>/dev/null | head -n1)"
-  fi
-  if [ -z "$extracted" ]; then
-    err "安装包中没有找到 OpenList 可执行文件。"
+    err "安装包中没有找到 openlist 可执行文件。"
     rm -rf "$tmp"
     return 1
   fi
@@ -194,30 +188,43 @@ install_openlist() {
   stop_process
   cp "$extracted" "$BINARY"
   chmod +x "$BINARY"
+
+  # Verify the binary before declaring success.
+  if ! "$BINARY" version >/dev/null 2>&1; then
+    err "OpenList 可执行文件验证失败。"
+    rm -f "$BINARY"
+    rm -rf "$tmp"
+    return 1
+  fi
+
   echo "$version" > "$INSTALL_DIR/version"
   rm -rf "$tmp"
   ok "OpenList $version 安装完成。"
 }
 
 update_openlist() {
+  local current latest
   if [ ! -x "$BINARY" ]; then
     install_openlist
-    return
+    return $?
   fi
-  local current latest
+
   current="$(cat "$INSTALL_DIR/version" 2>/dev/null || true)"
   latest="$(latest_version)"
   info "当前版本：${current:-未知}"
   info "最新版本：${latest:-未知}"
-  if [ -n "$current" ] && [ "$current" = "$latest" ]; then
+
+  if [ -n "$current" ] && [ -n "$latest" ] && [ "$current" = "$latest" ]; then
     ok "已经是最新版本。"
-    return
+    return 0
   fi
+
   install_openlist
 }
 
 show_status() {
   echo
+  echo "OpenList Toolkit：v$TOOLKIT_VERSION"
   echo "系统：$(get_os)"
   echo "架构：$(get_arch)"
   echo "安装目录：$INSTALL_DIR"
@@ -225,6 +232,7 @@ show_status() {
   if is_running; then
     echo "状态：运行中"
     echo "PID：$(cat "$INSTALL_DIR/openlist.pid")"
+    echo "地址：http://服务器IP:5244"
   else
     echo "状态：未运行"
   fi
@@ -237,15 +245,11 @@ show_logs() {
     warn "暂无日志。"
     return
   fi
-  if command_exists tail; then
-    tail -n 80 "$log"
-  else
-    cat "$log"
-  fi
+  tail -n 100 "$log"
 }
 
 uninstall_openlist() {
-  echo "这将删除 OpenList Toolkit 的安装文件和运行数据。"
+  echo "这将停止 OpenList 并删除 $INSTALL_DIR。"
   read -r -p "确认卸载？输入 YES：" confirm
   if [ "$confirm" != "YES" ]; then
     warn "已取消。"
@@ -261,7 +265,7 @@ menu() {
     clear 2>/dev/null || true
     echo "╔════════════════════════════════════╗"
     echo "║         OpenList Toolkit           ║"
-    echo "║             v0.1                   ║"
+    echo "║             v$TOOLKIT_VERSION                  ║"
     echo "╠════════════════════════════════════╣"
     echo "║  1. 安装 OpenList                  ║"
     echo "║  2. 更新 OpenList                  ║"
@@ -293,22 +297,11 @@ menu() {
   done
 }
 
-if [ "${1:-}" = "--install" ]; then
-  install_openlist
-  exit $?
-elif [ "${1:-}" = "--start" ]; then
-  start_openlist
-  exit $?
-elif [ "${1:-}" = "--stop" ]; then
-  stop_openlist
-  exit $?
-elif [ "${1:-}" = "--restart" ]; then
-  stop_openlist
-  start_openlist
-  exit $?
-elif [ "${1:-}" = "--status" ]; then
-  show_status
-  exit 0
-fi
-
-menu
+case "${1:-}" in
+  --install) install_openlist; exit $? ;;
+  --start) start_openlist; exit $? ;;
+  --stop) stop_openlist; exit $? ;;
+  --restart) stop_openlist; start_openlist; exit $? ;;
+  --status) show_status; exit 0 ;;
+  *) menu ;;
+esac
