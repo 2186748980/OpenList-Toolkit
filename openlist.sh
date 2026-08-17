@@ -2,7 +2,8 @@
 set -u
 
 # OpenList Toolkit - merged/cleaned for Termux and Linux
-TOOLKIT_VERSION="0.5.1"
+TOOLKIT_VERSION="0.6.0"
+# TOOLKIT_FEATURES_V060
 REPO="2186748980/OpenList-Toolkit"
 UPSTREAM="OpenListTeam/OpenList"
 HOME_DIR="${OPENLIST_HOME:-$HOME/.openlist}"
@@ -27,6 +28,11 @@ GITHUB_TOKEN_FILE="$HOME/.github_token"
 ARIA2_SECRET_FILE="$HOME/.aria2_secret"
 TUNNEL_NAME_FILE="$CF_DIR/tunnel.name"
 DOMAIN_FILE="$CF_DIR/domain"
+BOOT_DIR="$HOME/.termux/boot"
+BOOT_FILE="$BOOT_DIR/openlist-toolkit.sh"
+WATCHDOG_FILE="$BOOT_DIR/openlist-watchdog.sh"
+WATCHDOG_ENABLED="$HOME_DIR/.watchdog-enabled"
+MANUAL_STOP_FILE="$HOME_DIR/.manual-stop"
 LOCAL_PORT=5244
 
 R='\033[0m'; CY='\033[1;36m'; GR='\033[1;32m'; YE='\033[1;33m'; RE='\033[1;31m'; MA='\033[1;35m'; BL='\033[1;34m'; OR='\033[38;5;208m'; PI='\033[38;5;213m'; LI='\033[38;5;118m'; GRY='\033[1;30m'
@@ -125,6 +131,101 @@ EOF
 }
 
 
+network_status(){
+    echo "网络访问："
+    if ! running; then
+        echo "  OpenList 当前未运行"
+        return 0
+    fi
+    echo "  本机：http://127.0.0.1:$LOCAL_PORT"
+    local found=0 label
+    while IFS="|" read -r iface ip; do
+        [ -n "$ip" ] || continue
+        found=1
+        case "$iface" in
+            ap*) label="热点" ;;
+            wlan*) label="Wi-Fi" ;;
+            *) label="局域网" ;;
+        esac
+        if has curl && curl -fsS --connect-timeout 1 --max-time 2 -o /dev/null "http://$ip:$LOCAL_PORT/" 2>/dev/null; then
+            echo -e "  $label：${GR}http://$ip:$LOCAL_PORT${R} ✓"
+        else
+            echo -e "  $label：${YE}http://$ip:$LOCAL_PORT${R}"
+        fi
+    done <<EOF
+$(local_ips)
+EOF
+    [ "$found" -eq 1 ] || echo "  未发现可用局域网地址"
+}
+
+check_environment(){
+    line; center '环境与依赖检查'; line
+    local okc=0 warnc=0
+    check_dep(){ local name="$1" cmd="$2"; if has "$cmd"; then echo -e "${GR}✓${R} $name：$cmd"; okc=$((okc+1)); else echo -e "${YE}!${R} $name：未安装（$cmd）"; warnc=$((warnc+1)); fi; }
+    if is_termux; then echo -e "${GR}✓${R} Android / Termux"; else echo -e "${GR}✓${R} Linux：$(os_name)"; fi
+    check_dep "网络工具" curl
+    check_dep "压缩工具" tar
+    check_dep "网卡检测" ifconfig
+    check_dep "进程检测" pgrep
+    if is_termux && [ -d "$HOME/storage/shared" ]; then echo -e "${GR}✓${R} Termux 存储权限"; elif is_termux; then echo -e "${YE}!${R} Termux 存储未配置，可执行 termux-setup-storage"; warnc=$((warnc+1)); fi
+    if [ -x "$BINARY" ]; then echo -e "${GR}✓${R} OpenList：$(cat "$VERSION_FILE" 2>/dev/null || echo 已安装)"; else echo -e "${YE}!${R} OpenList：未安装"; warnc=$((warnc+1)); fi
+    if [ -f "$WATCHDOG_ENABLED" ]; then echo -e "${GR}✓${R} 异常自动恢复：已启用"; else echo -e "${CY}•${R} 异常自动恢复：未启用"; fi
+    echo "检查完成：$okc 项正常，$warnc 项需要注意。"
+}
+
+show_qr(){
+    local url=""
+    while IFS="|" read -r iface ip; do
+        [ -n "$ip" ] || continue
+        case "$iface" in ap*|wlan*) url="http://$ip:$LOCAL_PORT"; break;; esac
+    done <<EOF
+$(local_ips)
+EOF
+    [ -n "$url" ] || { warn '当前未发现热点/Wi-Fi 地址。'; return 1; }
+    echo "访问地址：$url"
+    if has qrencode; then
+        qrencode -t ANSIUTF8 "$url"
+    elif is_termux && has pkg; then
+        printf '未安装 qrencode，是否安装？(y/n)：'; read -r c
+        [[ "$c" =~ ^[Yy]$ ]] && pkg install -y qrencode && qrencode -t ANSIUTF8 "$url"
+    else
+        warn '请安装 qrencode 后重试。'
+    fi
+}
+
+setup_boot(){
+    is_termux || { warn '开机自启目前仅针对 Termux。'; return 1; }
+    mkdir -p "$BOOT_DIR"
+    : > "$WATCHDOG_ENABLED"
+    rm -f "$MANUAL_STOP_FILE"
+    cat > "$BOOT_FILE" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+sleep 15
+$SHORTCUT --start >/dev/null 2>&1 || true
+$SHORTCUT --watchdog >/dev/null 2>&1 &
+EOF
+    cat > "$WATCHDOG_FILE" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+while [ -f "$WATCHDOG_ENABLED" ]; do
+    if [ ! -f "$MANUAL_STOP_FILE" ] && [ -x "$BINARY" ]; then
+        if ! "$SHORTCUT" --status 2>/dev/null | grep -q '状态：.*运行中'; then
+            "$SHORTCUT" --start >/dev/null 2>&1 || true
+        fi
+    fi
+    sleep 30
+done
+EOF
+    chmod +x "$BOOT_FILE" "$WATCHDOG_FILE"
+    ok '已开启 Termux 开机自启 + OpenList 异常自动恢复。'
+    info '需要安装 Termux:Boot，并允许系统自启动/后台运行。'
+}
+
+remove_boot(){
+    is_termux || return 0
+    rm -f "$BOOT_FILE" "$WATCHDOG_FILE" "$WATCHDOG_ENABLED" "$MANUAL_STOP_FILE"
+    ok '已关闭 Termux 开机自启与异常自动恢复。'
+}
+
 install_service(){ systemd && root || return 0; cat > /etc/systemd/system/openlist-toolkit.service <<EOF
 [Unit]
 Description=OpenList managed by OpenList Toolkit
@@ -156,6 +257,7 @@ install_openlist(){
 }
 update_openlist(){ [ -x "$BINARY" ] || { install_openlist; return; }; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(upstream_version)"; info "当前：${cur:-未知}  最新：${latest:-未知}"; [ -n "$latest" ] || { err '无法获取上游版本。'; return 1; }; [ "$cur" = "$latest" ] && { ok '已经是最新版本。'; return 0; }; warn "发现新版本 $latest，开始更新……"; install_openlist; }
 start_openlist(){
+    rm -f "$MANUAL_STOP_FILE"
     mkdirs
     [ -x "$BINARY" ] || { err 'OpenList 尚未安装，请先选择 1。'; return 1; }
 
@@ -215,7 +317,9 @@ EOF
         return 1
     fi
 }
-stop_openlist(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true; ok 'OpenList 已停止。'; return; fi; if [ -f "$PID_FILE" ]; then local p="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$PID_FILE"; fi; ok 'OpenList 已停止。'; }
+stop_openlist(){
+    : > "$MANUAL_STOP_FILE"
+    if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true; ok 'OpenList 已停止。'; return; fi; if [ -f "$PID_FILE" ]; then local p="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$PID_FILE"; fi; ok 'OpenList 已停止。'; }
 restart_openlist(){ stop_openlist; start_openlist; }
 
 setup_aria2(){
@@ -317,7 +421,49 @@ logs(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then 
 aria2_logs(){ [ -f "$ARIA2_LOG" ] && tail -n 100 "$ARIA2_LOG" || warn '暂无 aria2 日志。'; }
 tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
 
-more(){ while true; do clear; line; center '更多功能'; line; echo -e "${GR}1.${R} 修改 OpenList 密码"; echo -e "${YE}2.${R} 编辑 OpenList 配置文件"; echo -e "${LI}3.${R} 编辑 aria2 配置文件"; echo -e "${CY}4.${R} 更新 aria2 BT Tracker"; echo -e "${MA}5.${R} 更新管理脚本"; echo -e "${RE}6.${R} 备份/还原 OpenList 数据"; echo -e "${OR}7.${R} 开启 OpenList 外网访问"; echo -e "${PI}8.${R} 停止 OpenList 外网访问"; echo -e "${LI}9.${R} 查看 Cloudflare Tunnel 日志"; echo -e "${CY}10.${R} 开启每日自动更新"; echo -e "${CY}11.${R} 关闭每日自动更新"; echo -e "${GRY}0.${R} 返回主菜单"; line; printf '请输入选项 (0-11)：'; read -r c; case "$c" in 1) reset_password; pause_menu;; 2) edit_openlist_config; pause_menu;; 3) edit_aria2_config; pause_menu;; 4) update_tracker; pause_menu;; 5) self_update; pause_menu;; 6) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;; 7) setup_cloudflare; pause_menu;; 8) stop_cloudflare; pause_menu;; 9) clear; tunnel_logs; pause_menu;; 10) setup_nightly; pause_menu;; 11) remove_nightly; pause_menu;; 0) break;; *) warn '无效选项。'; sleep 0.5;; esac; done; }
+more(){
+    while true; do
+        clear; line; center '更多功能'; line
+        echo -e "${GR}1.${R} 修改 OpenList 密码"
+        echo -e "${YE}2.${R} 编辑 OpenList 配置文件"
+        echo -e "${LI}3.${R} 编辑 aria2 配置文件"
+        echo -e "${CY}4.${R} 更新 aria2 BT Tracker"
+        echo -e "${MA}5.${R} 更新管理脚本"
+        echo -e "${RE}6.${R} 备份/还原 OpenList 数据"
+        echo -e "${OR}7.${R} 开启 OpenList 外网访问"
+        echo -e "${PI}8.${R} 停止 OpenList 外网访问"
+        echo -e "${LI}9.${R} 查看 Cloudflare Tunnel 日志"
+        echo -e "${CY}10.${R} 开启每日自动更新"
+        echo -e "${CY}11.${R} 关闭每日自动更新"
+        echo -e "${GR}12.${R} 网络访问地址 / IP 检测"
+        echo -e "${GR}13.${R} 生成 OpenList 访问二维码"
+        echo -e "${CY}14.${R} 环境与依赖检查"
+        echo -e "${OR}15.${R} 开启开机自启 + 异常自动恢复"
+        echo -e "${RE}16.${R} 关闭开机自启 + 异常自动恢复"
+        echo -e "${GRY}0.${R} 返回主菜单"
+        line; printf '请输入选项 (0-16)：'; read -r c
+        case "$c" in
+            1) reset_password; pause_menu;;
+            2) edit_openlist_config; pause_menu;;
+            3) edit_aria2_config; pause_menu;;
+            4) update_tracker; pause_menu;;
+            5) self_update; pause_menu;;
+            6) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;;
+            7) setup_cloudflare; pause_menu;;
+            8) stop_cloudflare; pause_menu;;
+            9) clear; tunnel_logs; pause_menu;;
+            10) setup_nightly; pause_menu;;
+            11) remove_nightly; pause_menu;;
+            12) clear; network_status; pause_menu;;
+            13) clear; show_qr; pause_menu;;
+            14) clear; check_environment; pause_menu;;
+            15) setup_boot; pause_menu;;
+            16) remove_boot; pause_menu;;
+            0) break;;
+            *) warn '无效选项。'; sleep 0.5;;
+        esac
+    done
+}
 
 menu(){
     while true; do
@@ -402,5 +548,5 @@ EOF
 
 mkdirs
 case "${1:-}" in
-  --install) install_openlist;; --update) update_openlist;; --start) start_openlist;; --stop) stop_openlist;; --restart) restart_openlist;; --status) status;; --logs) logs;; --aria2-start) start_aria2;; --aria2-stop) stop_aria2;; --backup) backup_data;; --self-update|--update-toolkit) self_update;; --setup-nightly-update) setup_nightly;; --remove-nightly-update) remove_nightly;; *) mkdir -p "$(dirname "$SHORTCUT")"; [ "${BASH_SOURCE[0]}" = "$SHORTCUT" ] || { cp "${BASH_SOURCE[0]}" "$SHORTCUT" 2>/dev/null || true; chmod +x "$SHORTCUT" 2>/dev/null || true; }; check_version_bg; menu;;
+  --install) install_openlist;; --update) update_openlist;; --start) start_openlist;; --stop) stop_openlist;; --restart) restart_openlist;; --status) status;; --network) network_status;; --check) check_environment;; --qr) show_qr;; --setup-boot) setup_boot;; --remove-boot) remove_boot;; --watchdog) while [ -f "$WATCHDOG_ENABLED" ]; do [ -f "$MANUAL_STOP_FILE" ] || { running || start_openlist >/dev/null 2>&1 || true; }; sleep 30; done;; --logs) logs;; --aria2-start) start_aria2;; --aria2-stop) stop_aria2;; --backup) backup_data;; --self-update|--update-toolkit) self_update;; --setup-nightly-update) setup_nightly;; --remove-nightly-update) remove_nightly;; *) mkdir -p "$(dirname "$SHORTCUT")"; [ "${BASH_SOURCE[0]}" = "$SHORTCUT" ] || { cp "${BASH_SOURCE[0]}" "$SHORTCUT" 2>/dev/null || true; chmod +x "$SHORTCUT" 2>/dev/null || true; }; check_version_bg; menu;;
 esac
