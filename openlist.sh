@@ -60,6 +60,71 @@ running(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; th
 aria2_running(){ [ -f "$ARIA2_PID_FILE" ] && kill -0 "$(cat "$ARIA2_PID_FILE" 2>/dev/null)" 2>/dev/null; }
 tunnel_running(){ has pgrep && pgrep -f 'cloudflared.*tunnel.*run' >/dev/null 2>&1; }
 
+# Detect usable local IPv4 addresses for LAN / hotspot access.
+local_ips(){
+    if ! has ifconfig; then
+        return 0
+    fi
+    ifconfig 2>/dev/null | awk '
+        /^[a-zA-Z0-9_.-]+:/ {
+            iface=$1
+            sub(/:$/, "", iface)
+            next
+        }
+        /inet / {
+            ip=$2
+            if (ip == "127.0.0.1") next
+            if (iface ~ /^tun[0-9]*$/) next
+            if (iface ~ /^ccmni[0-9]*$/) next
+            if (iface ~ /^lo$/) next
+            if (ip ~ /^169.254./) next
+            print iface "|" ip
+        }
+    '
+}
+
+network_status(){
+    echo "网络访问："
+
+    if ! running; then
+        echo "  OpenList 当前未运行"
+        return 0
+    fi
+
+    echo "  本机：http://127.0.0.1:$LOCAL_PORT"
+
+    local found=0
+
+    while IFS="|" read -r iface ip; do
+        [ -n "$ip" ] || continue
+        found=1
+
+        case "$iface" in
+            ap*)
+                label="热点"
+                ;;
+            wlan*)
+                label="Wi-Fi"
+                ;;
+            *)
+                label="局域网"
+                ;;
+        esac
+
+        # 本机测试端口
+        if timeout 1 bash -c "</dev/tcp/$ip/$LOCAL_PORT" 2>/dev/null; then
+            echo -e "  $label：${GR}http://$ip:$LOCAL_PORT${R} ✓"
+        else
+            echo -e "  $label：${YE}http://$ip:$LOCAL_PORT${R} ?"
+        fi
+    done <<EOF
+$(local_ips)
+EOF
+
+    [ "$found" -eq 1 ] || echo "  未发现可用局域网地址"
+}
+
+
 install_service(){ systemd && root || return 0; cat > /etc/systemd/system/openlist-toolkit.service <<EOF
 [Unit]
 Description=OpenList managed by OpenList Toolkit
@@ -90,7 +155,66 @@ install_openlist(){
     printf '%s\n' "$v" > "$VERSION_FILE"; printf '%s\n' "$v" > "$VERSION_CACHE"; rm -rf "$tmp"; install_service; ok "OpenList $v 安装完成。"
 }
 update_openlist(){ [ -x "$BINARY" ] || { install_openlist; return; }; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(upstream_version)"; info "当前：${cur:-未知}  最新：${latest:-未知}"; [ -n "$latest" ] || { err '无法获取上游版本。'; return 1; }; [ "$cur" = "$latest" ] && { ok '已经是最新版本。'; return 0; }; warn "发现新版本 $latest，开始更新……"; install_openlist; }
-start_openlist(){ mkdirs; [ -x "$BINARY" ] || { err 'OpenList 尚未安装，请先选择 1。'; return 1; }; if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl start openlist-toolkit.service && ok 'OpenList 已启动。' || err '启动失败，请查看日志。'; return; fi; running && { warn 'OpenList 已经在运行。'; return; }; nohup "$BINARY" server --data "$DATA_DIR" >"$LOG_DIR/openlist.log" 2>&1 & local p=$!; printf '%s\n' "$p" > "$PID_FILE"; sleep 0.5; running && ok "OpenList 已启动，PID：$p" || { err '启动失败，请查看日志。'; rm -f "$PID_FILE"; return 1; }; }
+start_openlist(){
+    mkdirs
+    [ -x "$BINARY" ] || { err 'OpenList 尚未安装，请先选择 1。'; return 1; }
+
+    if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then
+        systemctl start openlist-toolkit.service && ok 'OpenList 已启动。' || err '启动失败，请查看日志。'
+        echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
+        while IFS="|" read -r iface ip; do
+            [ -n "$ip" ] || continue
+            case "$iface" in
+                ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+                wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+                *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+            esac
+        done <<EOF
+$(local_ips)
+EOF
+        return
+    fi
+
+    running && {
+        warn 'OpenList 已经在运行。'
+        echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
+        while IFS="|" read -r iface ip; do
+            [ -n "$ip" ] || continue
+            case "$iface" in
+                ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+                wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+                *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+            esac
+        done <<EOF
+$(local_ips)
+EOF
+        return
+    }
+
+    nohup "$BINARY" server --data "$DATA_DIR" >"$LOG_DIR/openlist.log" 2>&1 &
+    local p=$!
+    printf '%s\n' "$p" > "$PID_FILE"
+    sleep 0.5
+
+    if running; then
+        ok "OpenList 已启动，PID：$p"
+        echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
+        while IFS="|" read -r iface ip; do
+            [ -n "$ip" ] || continue
+            case "$iface" in
+                ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+                wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+                *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+            esac
+        done <<EOF
+$(local_ips)
+EOF
+    else
+        err '启动失败，请查看日志。'
+        rm -f "$PID_FILE"
+        return 1
+    fi
+}
 stop_openlist(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true; ok 'OpenList 已停止。'; return; fi; if [ -f "$PID_FILE" ]; then local p="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$PID_FILE"; fi; ok 'OpenList 已停止。'; }
 restart_openlist(){ stop_openlist; start_openlist; }
 
@@ -167,14 +291,114 @@ EOF
 chmod +x "$HOME/.termux/boot/openlist-toolkit.sh"; ok '已写入 Termux:Boot 自动更新脚本。'; info 'Termux 本身不能保证凌晨定时执行，需要 Termux:Boot 或定时插件。'; else warn '当前环境不支持自动更新。'; fi; }
 remove_nightly(){ if systemd && root; then systemctl disable --now openlist-toolkit-update.timer >/dev/null 2>&1 || true; rm -f /etc/systemd/system/openlist-toolkit-update.timer /etc/systemd/system/openlist-toolkit-update.service; systemctl daemon-reload; elif is_termux; then rm -f "$HOME/.termux/boot/openlist-toolkit.sh"; fi; ok '已关闭自动更新。'; }
 
-status(){ echo -e "${MA}OpenList Toolkit${R}：v$TOOLKIT_VERSION"; echo "系统：$(os_name)"; echo "架构：$(arch)"; echo "安装目录：$HOME_DIR"; echo "OpenList：$(cat "$VERSION_FILE" 2>/dev/null || echo 未安装)"; running && echo -e "状态：${GR}运行中${R}" || echo -e "状态：${RE}未运行${R}"; aria2_running && echo -e "aria2：${GR}运行中${R}" || echo -e "aria2：${RE}未运行${R}"; tunnel_running && echo -e "Cloudflare Tunnel：${GR}运行中${R}" || echo -e "Cloudflare Tunnel：${RE}未运行${R}"; }
+status(){
+    local hip iface ip
+    echo -e "${MA}OpenList Toolkit${R}：v$TOOLKIT_VERSION"
+    echo "系统：$(os_name)"
+    echo "架构：$(arch)"
+    echo "安装目录：$HOME_DIR"
+    echo "OpenList：$(cat "$VERSION_FILE" 2>/dev/null || echo 未安装)"
+    running && echo -e "状态：${GR}运行中${R}" || echo -e "状态：${RE}未运行${R}"
+    echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
+    while IFS="|" read -r iface ip; do
+        [ -n "$ip" ] || continue
+        case "$iface" in
+            ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+            wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+            *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
+        esac
+    done <<EOF
+$(local_ips)
+EOF
+    aria2_running && echo -e "aria2：${GR}运行中${R}" || echo -e "aria2：${RE}未运行${R}"
+    tunnel_running && echo -e "Cloudflare Tunnel：${GR}运行中${R}" || echo -e "Cloudflare Tunnel：${RE}未运行${R}"
+}
 logs(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then journalctl -u openlist-toolkit.service -n 100 --no-pager; elif [ -f "$LOG_DIR/openlist.log" ]; then tail -n 100 "$LOG_DIR/openlist.log"; else warn '暂无 OpenList 日志。'; fi; }
 aria2_logs(){ [ -f "$ARIA2_LOG" ] && tail -n 100 "$ARIA2_LOG" || warn '暂无 aria2 日志。'; }
 tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
 
 more(){ while true; do clear; line; center '更多功能'; line; echo -e "${GR}1.${R} 修改 OpenList 密码"; echo -e "${YE}2.${R} 编辑 OpenList 配置文件"; echo -e "${LI}3.${R} 编辑 aria2 配置文件"; echo -e "${CY}4.${R} 更新 aria2 BT Tracker"; echo -e "${MA}5.${R} 更新管理脚本"; echo -e "${RE}6.${R} 备份/还原 OpenList 数据"; echo -e "${OR}7.${R} 开启 OpenList 外网访问"; echo -e "${PI}8.${R} 停止 OpenList 外网访问"; echo -e "${LI}9.${R} 查看 Cloudflare Tunnel 日志"; echo -e "${CY}10.${R} 开启每日自动更新"; echo -e "${CY}11.${R} 关闭每日自动更新"; echo -e "${GRY}0.${R} 返回主菜单"; line; printf '请输入选项 (0-11)：'; read -r c; case "$c" in 1) reset_password; pause_menu;; 2) edit_openlist_config; pause_menu;; 3) edit_aria2_config; pause_menu;; 4) update_tracker; pause_menu;; 5) self_update; pause_menu;; 6) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;; 7) setup_cloudflare; pause_menu;; 8) stop_cloudflare; pause_menu;; 9) clear; tunnel_logs; pause_menu;; 10) setup_nightly; pause_menu;; 11) remove_nightly; pause_menu;; 0) break;; *) warn '无效选项。'; sleep 0.5;; esac; done; }
 
-menu(){ while true; do clear; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(latest_version)"; line; center 'OpenList Toolkit'; center "v$TOOLKIT_VERSION"; line; printf '%b系统%b：%s   %b架构%b：%s\n' "$CY" "$R" "$(os_name)" "$CY" "$R" "$(arch)"; if [ -n "$cur" ]; then echo -e "${CY}OpenList${R}：$cur → 最新 ${latest:-未知}"; else echo -e "${CY}OpenList${R}：${YE}未安装${R} → 最新 ${latest:-未知}"; fi; running && echo -e "${CY}状态${R}：${GR}运行中${R}" || echo -e "${CY}状态${R}：${RE}未运行${R}"; line; echo '1. 安装 OpenList'; echo '2. 更新 OpenList'; echo '3. 启动 OpenList'; echo '4. 停止 OpenList'; echo '5. 重启 OpenList'; echo '6. 查看状态'; echo '7. 查看 OpenList 日志'; echo '8. 备份数据'; echo '9. 更多功能'; echo '0. 退出'; line; printf '请选择：'; read -r c; echo; case "$c" in 1) install_openlist; pause_menu;; 2) update_openlist; pause_menu;; 3) start_openlist; pause_menu;; 4) stop_openlist; pause_menu;; 5) restart_openlist; pause_menu;; 6) status; pause_menu;; 7) logs; pause_menu;; 8) backup_data; pause_menu;; 9) more;; 0) exit 0;; *) warn '无效选项。'; sleep 0.5;; esac; done; }
+menu(){
+    while true; do
+        clear
+        local cur latest
+        cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"
+        latest="$(latest_version)"
+
+        line
+        center 'OpenList Toolkit'
+        center "v$TOOLKIT_VERSION"
+        line
+
+        printf '%b系统%b：%s   %b架构%b：%s\n' \
+            "$CY" "$R" "$(os_name)" "$CY" "$R" "$(arch)"
+
+        if [ -n "$cur" ]; then
+            echo -e "${CY}OpenList${R}：$cur → 最新 ${latest:-未知}"
+        else
+            echo -e "${CY}OpenList${R}：${YE}未安装${R} → 最新 ${latest:-未知}"
+        fi
+
+        running && \
+            echo -e "${CY}状态${R}：${GR}运行中${R}" || \
+            echo -e "${CY}状态${R}：${RE}未运行${R}"
+
+        # 当前本机访问地址
+        if running; then
+            echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
+
+            while IFS="|" read -r iface ip; do
+                [ -n "$ip" ] || continue
+
+                case "$iface" in
+                    ap*)
+                        echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}"
+                        ;;
+                    wlan*)
+                        echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}"
+                        ;;
+                    *)
+                        echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}"
+                        ;;
+                esac
+            done <<EOF
+$(local_ips)
+EOF
+        fi
+
+        line
+        echo '1. 安装 OpenList'
+        echo '2. 更新 OpenList'
+        echo '3. 启动 OpenList'
+        echo '4. 停止 OpenList'
+        echo '5. 重启 OpenList'
+        echo '6. 查看状态'
+        echo '7. 查看 OpenList 日志'
+        echo '8. 备份数据'
+        echo '9. 更多功能'
+        echo '0. 退出'
+        line
+
+        printf '请选择：'
+        read -r c
+        echo
+
+        case "$c" in
+            1) install_openlist; pause_menu ;;
+            2) update_openlist; pause_menu ;;
+            3) start_openlist; pause_menu ;;
+            4) stop_openlist; pause_menu ;;
+            5) restart_openlist; pause_menu ;;
+            6) status; pause_menu ;;
+            7) logs; pause_menu ;;
+            8) backup_data; pause_menu ;;
+            9) more ;;
+            0) exit 0 ;;
+            *) warn '无效选项。'; sleep 0.5 ;;
+        esac
+    done
+}
 
 mkdirs
 case "${1:-}" in
