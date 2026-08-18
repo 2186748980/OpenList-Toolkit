@@ -181,7 +181,9 @@ edit_aria2_config(){ setup_aria2 || return; ${EDITOR:-vi} "$ARIA2_CONF"; }
 aria2_logs(){ [ -f "$ARIA2_LOG" ] && tail -n 100 "$ARIA2_LOG" || warn '暂无 aria2 日志。'; }
 update_tracker(){ setup_aria2 || return 1; local url='https://raw.githubusercontent.com/giturass/aria2.conf/refs/heads/master/tracker.sh'; if has curl; then curl -fsSL "$url" | bash -s -- "$ARIA2_CONF" || return 1; else wget -qO- "$url" | bash -s -- "$ARIA2_CONF" || return 1; fi; ok 'BT Tracker 更新完成。'; }
 
-ariang_latest(){ api_get "https://api.github.com/repos/$ARIANG_REPO/releases/latest" | sed -n 's/.*"browser_download_url":"\([^"]*AllInOne\.zip\)".*/\1/p' | head -n1; }
+ariang_latest(){
+    printf '%s\n' "https://github.com/mayswind/AriaNg/releases/download/1.3.14/AriaNg-1.3.14-AllInOne.zip"
+}
 install_ariang(){
     mkdirs; local url tmp file version
     url="$(ariang_latest)"; [ -n "$url" ] || { err '无法获取 AriaNg 最新版本。'; return 1; }
