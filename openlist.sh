@@ -177,20 +177,56 @@ show_qr(){
     local url=""
     while IFS="|" read -r iface ip; do
         [ -n "$ip" ] || continue
-        case "$iface" in ap*|wlan*) url="http://$ip:$LOCAL_PORT"; break;; esac
+        case "$iface" in
+            ap*|wlan*) url="http://$ip:$LOCAL_PORT"; break;;
+        esac
     done <<EOF
 $(local_ips)
 EOF
+
     [ -n "$url" ] || { warn '当前未发现热点/Wi-Fi 地址。'; return 1; }
+
     echo "访问地址：$url"
+
     if has qrencode; then
         qrencode -t ANSIUTF8 "$url"
-    elif is_termux && has pkg; then
-        printf '未安装 qrencode，是否安装？(y/n)：'; read -r c
-        [[ "$c" =~ ^[Yy]$ ]] && pkg install -y qrencode && qrencode -t ANSIUTF8 "$url"
-    else
-        warn '请安装 qrencode 后重试。'
+        return
     fi
+
+    if ! has python; then
+        warn '未找到 Python，无法生成二维码。'
+        return 1
+    fi
+
+    if ! python -c 'import qrcode' >/dev/null 2>&1; then
+        info '正在安装 Python 二维码模块...'
+        python -m pip install --user qrcode[pil] || {
+            err 'Python 二维码模块安装失败。'
+            return 1
+        }
+    fi
+
+    python - "$url" <<'PYQR'
+import sys
+import qrcode
+
+url = sys.argv[1]
+
+qr = qrcode.QRCode(
+    version=None,
+    error_correction=qrcode.constants.ERROR_CORRECT_M,
+    box_size=1,
+    border=1,
+)
+
+qr.add_data(url)
+qr.make(fit=True)
+
+matrix = qr.get_matrix()
+
+for row in matrix:
+    print("".join("██" if cell else "  " for cell in row))
+PYQR
 }
 
 setup_boot(){
