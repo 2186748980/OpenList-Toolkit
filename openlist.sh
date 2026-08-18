@@ -48,7 +48,6 @@ arch(){ case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm
 os_name(){ if is_termux; then echo android; elif [ -f /etc/os-release ]; then . /etc/os-release; echo "${ID:-linux}"; else echo linux; fi; }
 mkdirs(){ mkdir -p "$BIN_DIR" "$DATA_DIR" "$LOG_DIR" "$ARIA2_DIR" "$CF_DIR" "$BACKUP_DIR" "$HOME/.local/bin"; }
 
-# Terminal-safe layout. No tput/ncurses dependency and no fixed-width overflow.
 term_width(){ local w; w=$(stty size 2>/dev/null | awk '{print $2}'); case "$w" in ''|*[!0-9]*) w=80;; esac; echo "$w"; }
 box_width(){ local w; w=$(term_width); [ "$w" -gt 58 ] && w=58; [ "$w" -lt 34 ] && w=34; echo "$w"; }
 line(){ local w; w=$(box_width); printf "%b%s%b\n" "$BL" "$(printf "%*s" "$w" "" | tr " " "=")" "$R"; }
@@ -66,17 +65,10 @@ running(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; th
 aria2_running(){ [ -f "$ARIA2_PID_FILE" ] && kill -0 "$(cat "$ARIA2_PID_FILE" 2>/dev/null)" 2>/dev/null; }
 tunnel_running(){ has pgrep && pgrep -f 'cloudflared.*tunnel.*run' >/dev/null 2>&1; }
 
-# Detect usable local IPv4 addresses for LAN / hotspot access.
 local_ips(){
-    if ! has ifconfig; then
-        return 0
-    fi
+    if ! has ifconfig; then return 0; fi
     ifconfig 2>/dev/null | awk '
-        /^[a-zA-Z0-9_.-]+:/ {
-            iface=$1
-            sub(/:$/, "", iface)
-            next
-        }
+        /^[a-zA-Z0-9_.-]+:/ { iface=$1; sub(/:$/, "", iface); next }
         /inet / {
             ip=$2
             if (ip == "127.0.0.1") next
@@ -91,62 +83,13 @@ local_ips(){
 
 network_status(){
     echo "网络访问："
-
-    if ! running; then
-        echo "  OpenList 当前未运行"
-        return 0
-    fi
-
-    echo "  本机：http://127.0.0.1:$LOCAL_PORT"
-
-    local found=0
-
-    while IFS="|" read -r iface ip; do
-        [ -n "$ip" ] || continue
-        found=1
-
-        case "$iface" in
-            ap*)
-                label="热点"
-                ;;
-            wlan*)
-                label="Wi-Fi"
-                ;;
-            *)
-                label="局域网"
-                ;;
-        esac
-
-        # 本机测试端口
-        if timeout 1 bash -c "</dev/tcp/$ip/$LOCAL_PORT" 2>/dev/null; then
-            echo -e "  $label：${GR}http://$ip:$LOCAL_PORT${R} ✓"
-        else
-            echo -e "  $label：${YE}http://$ip:$LOCAL_PORT${R} ?"
-        fi
-    done <<EOF
-$(local_ips)
-EOF
-
-    [ "$found" -eq 1 ] || echo "  未发现可用局域网地址"
-}
-
-
-network_status(){
-    echo "网络访问："
-    if ! running; then
-        echo "  OpenList 当前未运行"
-        return 0
-    fi
+    if ! running; then echo "  OpenList 当前未运行"; return 0; fi
     echo "  本机：http://127.0.0.1:$LOCAL_PORT"
     local found=0 label
     while IFS="|" read -r iface ip; do
         [ -n "$ip" ] || continue
         found=1
-        case "$iface" in
-            ap*) label="热点" ;;
-            wlan*) label="Wi-Fi" ;;
-            *) label="局域网" ;;
-        esac
+        case "$iface" in ap*) label="热点" ;; wlan*) label="Wi-Fi" ;; *) label="局域网" ;; esac
         if has curl && curl -fsS --connect-timeout 1 --max-time 2 -o /dev/null "http://$ip:$LOCAL_PORT/" 2>/dev/null; then
             echo -e "  $label：${GR}http://$ip:$LOCAL_PORT${R} ✓"
         else
@@ -163,10 +106,7 @@ check_environment(){
     local okc=0 warnc=0
     check_dep(){ local name="$1" cmd="$2"; if has "$cmd"; then echo -e "${GR}✓${R} $name：$cmd"; okc=$((okc+1)); else echo -e "${YE}!${R} $name：未安装（$cmd）"; warnc=$((warnc+1)); fi; }
     if is_termux; then echo -e "${GR}✓${R} Android / Termux"; else echo -e "${GR}✓${R} Linux：$(os_name)"; fi
-    check_dep "网络工具" curl
-    check_dep "压缩工具" tar
-    check_dep "网卡检测" ifconfig
-    check_dep "进程检测" pgrep
+    check_dep "网络工具" curl; check_dep "压缩工具" tar; check_dep "网卡检测" ifconfig; check_dep "进程检测" pgrep
     if is_termux && [ -d "$HOME/storage/shared" ]; then echo -e "${GR}✓${R} Termux 存储权限"; elif is_termux; then echo -e "${YE}!${R} Termux 存储未配置，可执行 termux-setup-storage"; warnc=$((warnc+1)); fi
     if [ -x "$BINARY" ]; then echo -e "${GR}✓${R} OpenList：$(cat "$VERSION_FILE" 2>/dev/null || echo 已安装)"; else echo -e "${YE}!${R} OpenList：未安装"; warnc=$((warnc+1)); fi
     if [ -f "$WATCHDOG_ENABLED" ]; then echo -e "${GR}✓${R} 异常自动恢复：已启用"; else echo -e "${CY}•${R} 异常自动恢复：未启用"; fi
@@ -177,63 +117,32 @@ show_qr(){
     local url=""
     while IFS="|" read -r iface ip; do
         [ -n "$ip" ] || continue
-        case "$iface" in
-            ap*|wlan*) url="http://$ip:$LOCAL_PORT"; break;;
-        esac
+        case "$iface" in ap*|wlan*) url="http://$ip:$LOCAL_PORT"; break;; esac
     done <<EOF
 $(local_ips)
 EOF
-
     [ -n "$url" ] || { warn '当前未发现热点/Wi-Fi 地址。'; return 1; }
-
     echo "访问地址：$url"
-
-    if has qrencode; then
-        qrencode -t ANSIUTF8 "$url"
-        return
-    fi
-
-    if ! has python; then
-        warn '未找到 Python，无法生成二维码。'
-        return 1
-    fi
-
+    if has qrencode; then qrencode -t ANSIUTF8 "$url"; return; fi
+    if ! has python; then warn '未找到 Python，无法生成二维码。'; return 1; fi
     if ! python -c 'import qrcode' >/dev/null 2>&1; then
         info '正在安装 Python 二维码模块...'
-        python -m pip install --user qrcode[pil] || {
-            err 'Python 二维码模块安装失败。'
-            return 1
-        }
+        python -m pip install --user qrcode[pil] || { err 'Python 二维码模块安装失败。'; return 1; }
     fi
-
     python - "$url" <<'PYQR'
 import sys
 import qrcode
-
 url = sys.argv[1]
-
-qr = qrcode.QRCode(
-    version=None,
-    error_correction=qrcode.constants.ERROR_CORRECT_M,
-    box_size=1,
-    border=1,
-)
-
-qr.add_data(url)
-qr.make(fit=True)
-
-matrix = qr.get_matrix()
-
-for row in matrix:
+qr = qrcode.QRCode(version=None,error_correction=qrcode.constants.ERROR_CORRECT_M,box_size=1,border=1)
+qr.add_data(url); qr.make(fit=True)
+for row in qr.get_matrix():
     print("".join("██" if cell else "  " for cell in row))
 PYQR
 }
 
 setup_boot(){
     is_termux || { warn '开机自启目前仅针对 Termux。'; return 1; }
-    mkdir -p "$BOOT_DIR"
-    : > "$WATCHDOG_ENABLED"
-    rm -f "$MANUAL_STOP_FILE"
+    mkdir -p "$BOOT_DIR"; : > "$WATCHDOG_ENABLED"; rm -f "$MANUAL_STOP_FILE"
     cat > "$BOOT_FILE" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 sleep 15
@@ -244,23 +153,14 @@ EOF
 #!/data/data/com.termux/files/usr/bin/bash
 while [ -f "$WATCHDOG_ENABLED" ]; do
     if [ ! -f "$MANUAL_STOP_FILE" ] && [ -x "$BINARY" ]; then
-        if ! "$SHORTCUT" --status 2>/dev/null | grep -q '状态：.*运行中'; then
-            "$SHORTCUT" --start >/dev/null 2>&1 || true
-        fi
+        if ! "$SHORTCUT" --status 2>/dev/null | grep -q '状态：.*运行中'; then "$SHORTCUT" --start >/dev/null 2>&1 || true; fi
     fi
     sleep 30
 done
 EOF
-    chmod +x "$BOOT_FILE" "$WATCHDOG_FILE"
-    ok '已开启 Termux 开机自启 + OpenList 异常自动恢复。'
-    info '需要安装 Termux:Boot，并允许系统自启动/后台运行。'
+    chmod +x "$BOOT_FILE" "$WATCHDOG_FILE"; ok '已开启 Termux 开机自启 + OpenList 异常自动恢复。'; info '需要安装 Termux:Boot，并允许系统自启动/后台运行。'
 }
-
-remove_boot(){
-    is_termux || return 0
-    rm -f "$BOOT_FILE" "$WATCHDOG_FILE" "$WATCHDOG_ENABLED" "$MANUAL_STOP_FILE"
-    ok '已关闭 Termux 开机自启与异常自动恢复。'
-}
+remove_boot(){ is_termux || return 0; rm -f "$BOOT_FILE" "$WATCHDOG_FILE" "$WATCHDOG_ENABLED" "$MANUAL_STOP_FILE"; ok '已关闭 Termux 开机自启与异常自动恢复。'; }
 
 install_service(){ systemd && root || return 0; cat > /etc/systemd/system/openlist-toolkit.service <<EOF
 [Unit]
@@ -292,70 +192,28 @@ install_openlist(){
     printf '%s\n' "$v" > "$VERSION_FILE"; printf '%s\n' "$v" > "$VERSION_CACHE"; rm -rf "$tmp"; install_service; ok "OpenList $v 安装完成。"
 }
 update_openlist(){ [ -x "$BINARY" ] || { install_openlist; return; }; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(upstream_version)"; info "当前：${cur:-未知}  最新：${latest:-未知}"; [ -n "$latest" ] || { err '无法获取上游版本。'; return 1; }; [ "$cur" = "$latest" ] && { ok '已经是最新版本。'; return 0; }; warn "发现新版本 $latest，开始更新……"; install_openlist; }
+
 start_openlist(){
-    rm -f "$MANUAL_STOP_FILE"
-    mkdirs
-    [ -x "$BINARY" ] || { err 'OpenList 尚未安装，请先选择 1。'; return 1; }
-
+    rm -f "$MANUAL_STOP_FILE"; mkdirs; [ -x "$BINARY" ] || { err 'OpenList 尚未安装，请先选择 1。'; return 1; }
     if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then
-        systemctl start openlist-toolkit.service && ok 'OpenList 已启动。' || err '启动失败，请查看日志。'
-        echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
-        while IFS="|" read -r iface ip; do
-            [ -n "$ip" ] || continue
-            case "$iface" in
-                ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-                wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-                *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-            esac
-        done <<EOF
+        systemctl start openlist-toolkit.service && ok 'OpenList 已启动。' || err '启动失败，请查看日志。'; echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
+        while IFS="|" read -r iface ip; do [ -n "$ip" ] || continue; case "$iface" in ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; esac; done <<EOF
 $(local_ips)
 EOF
         return
     fi
-
-    running && {
-        warn 'OpenList 已经在运行。'
-        echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
-        while IFS="|" read -r iface ip; do
-            [ -n "$ip" ] || continue
-            case "$iface" in
-                ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-                wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-                *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-            esac
-        done <<EOF
+    running && { warn 'OpenList 已经在运行。'; echo "本机访问：http://127.0.0.1:$LOCAL_PORT"; while IFS="|" read -r iface ip; do [ -n "$ip" ] || continue; case "$iface" in ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; esac; done <<EOF
 $(local_ips)
 EOF
-        return
-    }
-
-    nohup "$BINARY" server --data "$DATA_DIR" >"$LOG_DIR/openlist.log" 2>&1 &
-    local p=$!
-    printf '%s\n' "$p" > "$PID_FILE"
-    sleep 0.5
-
+        return; }
+    nohup "$BINARY" server --data "$DATA_DIR" >"$LOG_DIR/openlist.log" 2>&1 & local p=$!; printf '%s\n' "$p" > "$PID_FILE"; sleep 0.5
     if running; then
-        ok "OpenList 已启动，PID：$p"
-        echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
-        while IFS="|" read -r iface ip; do
-            [ -n "$ip" ] || continue
-            case "$iface" in
-                ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-                wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-                *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-            esac
-        done <<EOF
+        ok "OpenList 已启动，PID：$p"; echo "本机访问：http://127.0.0.1:$LOCAL_PORT"; while IFS="|" read -r iface ip; do [ -n "$ip" ] || continue; case "$iface" in ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; esac; done <<EOF
 $(local_ips)
 EOF
-    else
-        err '启动失败，请查看日志。'
-        rm -f "$PID_FILE"
-        return 1
-    fi
+    else err '启动失败，请查看日志。'; rm -f "$PID_FILE"; return 1; fi
 }
-stop_openlist(){
-    : > "$MANUAL_STOP_FILE"
-    if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true; ok 'OpenList 已停止。'; return; fi; if [ -f "$PID_FILE" ]; then local p="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$PID_FILE"; fi; ok 'OpenList 已停止。'; }
+stop_openlist(){ : > "$MANUAL_STOP_FILE"; if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true; ok 'OpenList 已停止。'; return; fi; if [ -f "$PID_FILE" ]; then local p="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$PID_FILE"; fi; ok 'OpenList 已停止。'; }
 restart_openlist(){ stop_openlist; start_openlist; }
 
 setup_aria2(){
@@ -432,7 +290,6 @@ chmod +x "$HOME/.termux/boot/openlist-toolkit.sh"; ok '已写入 Termux:Boot 自
 remove_nightly(){ if systemd && root; then systemctl disable --now openlist-toolkit-update.timer >/dev/null 2>&1 || true; rm -f /etc/systemd/system/openlist-toolkit-update.timer /etc/systemd/system/openlist-toolkit-update.service; systemctl daemon-reload; elif is_termux; then rm -f "$HOME/.termux/boot/openlist-toolkit.sh"; fi; ok '已关闭自动更新。'; }
 
 status(){
-    local hip iface ip
     echo -e "${MA}OpenList Toolkit${R}：v$TOOLKIT_VERSION"
     echo "系统：$(os_name)"
     echo "架构：$(arch)"
@@ -442,11 +299,7 @@ status(){
     echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
     while IFS="|" read -r iface ip; do
         [ -n "$ip" ] || continue
-        case "$iface" in
-            ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-            wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-            *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;;
-        esac
+        case "$iface" in ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; esac
     done <<EOF
 $(local_ips)
 EOF
@@ -457,46 +310,17 @@ logs(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then 
 aria2_logs(){ [ -f "$ARIA2_LOG" ] && tail -n 100 "$ARIA2_LOG" || warn '暂无 aria2 日志。'; }
 tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
 
-
 aria2_menu(){
     while true; do
-        clear
-        line
-        center 'aria2 管理'
-        line
-
-        aria2_running && \
-            echo -e "${CY}aria2 状态${R}：${GR}运行中${R}" || \
-            echo -e "${CY}aria2 状态${R}：${RE}未运行${R}"
-
+        clear; line; center 'aria2 管理'; line
+        aria2_running && echo -e "${CY}aria2 状态${R}：${GR}运行中${R}" || echo -e "${CY}aria2 状态${R}：${RE}未运行${R}"
         echo "RPC 地址：http://127.0.0.1:6800"
         echo "RPC 密钥文件：$ARIA2_SECRET_FILE"
-
         line
-        echo '1. 启动 aria2'
-        echo '2. 停止 aria2'
-        echo '3. 重启 aria2'
-        echo '4. 查看 aria2 状态'
-        echo '5. 查看 aria2 日志'
-        echo '6. 编辑 aria2 配置文件'
-        echo '7. 更新 aria2 BT Tracker'
-        echo '0. 返回主菜单'
-        line
-
-        printf '请选择：'
-        read -r c
-        echo
-
+        echo '1. 启动 aria2'; echo '2. 停止 aria2'; echo '3. 重启 aria2'; echo '4. 查看 aria2 状态'; echo '5. 查看 aria2 日志'; echo '6. 编辑 aria2 配置文件'; echo '7. 更新 aria2 BT Tracker'; echo '0. 返回主菜单'
+        line; printf '请选择：'; read -r c; echo
         case "$c" in
-            1) start_aria2; pause_menu ;;
-            2) stop_aria2; pause_menu ;;
-            3) stop_aria2; start_aria2; pause_menu ;;
-            4) clear; aria2_running && echo -e "aria2 状态：${GR}运行中${R}" || echo -e "aria2 状态：${RE}未运行${R}"; pause_menu ;;
-            5) clear; aria2_logs; pause_menu ;;
-            6) edit_aria2_config; pause_menu ;;
-            7) update_tracker; pause_menu ;;
-            0) break ;;
-            *) warn '无效选项。'; sleep 0.5 ;;
+            1) start_aria2; pause_menu ;; 2) stop_aria2; pause_menu ;; 3) stop_aria2; start_aria2; pause_menu ;; 4) clear; aria2_running && echo -e "aria2 状态：${GR}运行中${R}" || echo -e "aria2 状态：${RE}未运行${R}"; pause_menu ;; 5) clear; aria2_logs; pause_menu ;; 6) edit_aria2_config; pause_menu ;; 7) update_tracker; pause_menu ;; 0) break ;; *) warn '无效选项。'; sleep 0.5 ;;
         esac
     done
 }
@@ -504,8 +328,6 @@ aria2_menu(){
 more(){
     while true; do
         clear; line; center '更多功能'; line
-        echo -e "${GR}1.${R} 修改 OpenList 密码"
-        echo -e "${YE}2.${R} 编辑 OpenList 配置文件"
         echo -e "${MA}1.${R} 修改 OpenList 密码"
         echo -e "${YE}2.${R} 编辑 OpenList 配置文件"
         echo -e "${MA}3.${R} 更新管理脚本"
@@ -523,22 +345,7 @@ more(){
         echo -e "${GRY}0.${R} 返回主菜单"
         line; printf '请输入选项 (0-14)：'; read -r c
         case "$c" in
-            1) reset_password; pause_menu;;
-            2) edit_openlist_config; pause_menu;;
-            3) self_update; pause_menu;;
-            4) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;;
-            5) setup_cloudflare; pause_menu;;
-            6) stop_cloudflare; pause_menu;;
-            7) clear; tunnel_logs; pause_menu;;
-            8) setup_nightly; pause_menu;;
-            9) remove_nightly; pause_menu;;
-            10) clear; network_status; pause_menu;;
-            11) clear; show_qr; pause_menu;;
-            12) clear; check_environment; pause_menu;;
-            13) setup_boot; pause_menu;;
-            14) remove_boot; pause_menu;;
-            0) break;;
-            *) warn '无效选项。'; sleep 0.5;;
+            1) reset_password; pause_menu;; 2) edit_openlist_config; pause_menu;; 3) self_update; pause_menu;; 4) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;; 5) setup_cloudflare; pause_menu;; 6) stop_cloudflare; pause_menu;; 7) clear; tunnel_logs; pause_menu;; 8) setup_nightly; pause_menu;; 9) remove_nightly; pause_menu;; 10) clear; network_status; pause_menu;; 11) clear; show_qr; pause_menu;; 12) clear; check_environment; pause_menu;; 13) setup_boot; pause_menu;; 14) remove_boot; pause_menu;; 0) break;; *) warn '无效选项。'; sleep 0.5;;
         esac
     done
 }
@@ -547,85 +354,36 @@ menu(){
     while true; do
         clear
         local cur latest
-        cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"
-        latest="$(latest_version)"
-
-        line
-        center 'OpenList Toolkit'
-        center "v$TOOLKIT_VERSION"
-        line
-
-        printf '%b系统%b：%s   %b架构%b：%s\n' \
-            "$CY" "$R" "$(os_name)" "$CY" "$R" "$(arch)"
-
-        if [ -n "$cur" ]; then
-            echo -e "${CY}OpenList${R}：$cur → 最新 ${latest:-未知}"
-        else
-            echo -e "${CY}OpenList${R}：${YE}未安装${R} → 最新 ${latest:-未知}"
-        fi
-
-        running && \
-            echo -e "${CY}OpenList 状态${R}：${GR}运行中${R}" || \
-            echo -e "${CY}OpenList 状态${R}：${RE}未运行${R}"
-
-        aria2_running && \
-            echo -e "${CY}aria2 状态${R}：${GR}运行中${R}" || \
-            echo -e "${CY}aria2 状态${R}：${RE}未运行${R}"
-
-        # 当前本机访问地址
+        cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(latest_version)"
+        line; center 'OpenList Toolkit'; center "v$TOOLKIT_VERSION"; line
+        printf '%b系统%b：%s   %b架构%b：%s\n' "$CY" "$R" "$(os_name)" "$CY" "$R" "$(arch)"
+        if [ -n "$cur" ]; then echo -e "${CY}OpenList${R}：$cur → 最新 ${latest:-未知}"; else echo -e "${CY}OpenList${R}：${YE}未安装${R} → 最新 ${latest:-未知}"; fi
+        running && echo -e "${CY}OpenList 状态${R}：${GR}运行中${R}" || echo -e "${CY}OpenList 状态${R}：${RE}未运行${R}"
+        aria2_running && echo -e "${CY}aria2 状态${R}：${GR}运行中${R}" || echo -e "${CY}aria2 状态${R}：${RE}未运行${R}"
+        tunnel_running && echo -e "${CY}Cloudflare Tunnel 状态${R}：${GR}运行中${R}" || echo -e "${CY}Cloudflare Tunnel 状态${R}：${RE}未运行${R}"
         if running; then
             echo "本机访问：http://127.0.0.1:$LOCAL_PORT"
-
             while IFS="|" read -r iface ip; do
                 [ -n "$ip" ] || continue
-
-                case "$iface" in
-                    ap*)
-                        echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}"
-                        ;;
-                    wlan*)
-                        echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}"
-                        ;;
-                    *)
-                        echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}"
-                        ;;
-                esac
+                case "$iface" in ap*) echo -e "热点访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; wlan*) echo -e "Wi-Fi访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; *) echo -e "局域网访问：${GR}http://$ip:$LOCAL_PORT${R}" ;; esac
             done <<EOF
 $(local_ips)
 EOF
         fi
-
         line
         echo '1. 安装 OpenList'
         echo '2. 更新 OpenList'
         echo '3. 启动 OpenList'
         echo '4. 停止 OpenList'
         echo '5. 重启 OpenList'
-        echo '6. 查看状态'
-        echo '7. 查看 OpenList 日志'
-        echo '8. 备份数据'
-        echo '9. aria2 管理'
-        echo '10. 更多功能'
+        echo '6. 查看 OpenList 日志'
+        echo '7. 备份数据'
+        echo '8. aria2 管理'
+        echo '9. 更多功能'
         echo '0. 退出'
-        line
-
-        printf '请选择：'
-        read -r c
-        echo
-
+        line; printf '请选择：'; read -r c; echo
         case "$c" in
-            1) install_openlist; pause_menu ;;
-            2) update_openlist; pause_menu ;;
-            3) start_openlist; pause_menu ;;
-            4) stop_openlist; pause_menu ;;
-            5) restart_openlist; pause_menu ;;
-            6) status; pause_menu ;;
-            7) logs; pause_menu ;;
-            8) backup_data; pause_menu ;;
-            9) aria2_menu ;;
-            10) more ;;
-            0) exit 0 ;;
-            *) warn '无效选项。'; sleep 0.5 ;;
+            1) install_openlist; pause_menu ;; 2) update_openlist; pause_menu ;; 3) start_openlist; pause_menu ;; 4) stop_openlist; pause_menu ;; 5) restart_openlist; pause_menu ;; 6) logs; pause_menu ;; 7) backup_data; pause_menu ;; 8) aria2_menu ;; 9) more ;; 0) exit 0 ;; *) warn '无效选项。'; sleep 0.5 ;;
         esac
     done
 }
