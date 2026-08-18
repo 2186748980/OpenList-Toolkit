@@ -1,0 +1,62 @@
+name: Update AriaNg updater logic
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replace AriaNg updater
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          p = Path('openlist.sh')
+          s = p.read_text()
+
+          latest = '''ariang_latest(){
+              local tag=""
+              if has curl; then
+                  tag="$(curl -fsSL --retry 2 --connect-timeout 8 -o /dev/null -w '%{url_effective}' 'https://github.com/$ARIANG_REPO/releases/latest' 2>/dev/null | sed 's#.*/tag/##' | tr -d '\\r\\n')"
+              elif has wget; then
+                  tag="$(wget --max-redirect=10 --server-response --spider 'https://github.com/$ARIANG_REPO/releases/latest' 2>&1 | sed -n 's#.*Location: https://github.com/$ARIANG_REPO/releases/tag/##p' | tail -n1 | tr -d '\\r')"
+              fi
+              [ -n "$tag" ] || tag="1.3.14"
+              printf '%s\\n' "https://github.com/$ARIANG_REPO/releases/download/$tag/AriaNg-$tag-AllInOne.zip"
+          }
+          '''
+
+          pattern = r'ariang_latest\(\)\{.*?\n\}\ninstall_ariang\(\)\{'
+          if not re.search(pattern, s, re.S):
+              raise SystemExit('ariang_latest block not found')
+          s = re.sub(pattern, latest + 'install_ariang(){', s, count=1, flags=re.S)
+
+          marker = '''    version="$(printf '%s' "$url" | sed -n 's#.*releases/download/\\([^/]*/\\)AriaNg-\\([^/-]*\\)-AllInOne\\.zip#\\2#p')"; [ -n "$version" ] || version="$(printf '%s' "$url" | sed -n 's#.*AriaNg-\\([^/-]*\\)-AllInOne\\.zip#\\1#p')"\n'''
+          replacement = marker + '''    if [ -f "$ARIANG_HTML" ] && [ -f "$ARIANG_VERSION_FILE" ] && [ "$(cat "$ARIANG_VERSION_FILE" 2>/dev/null)" = "$version" ]; then
+        ok "AriaNg v$version 已是最新版本，无需更新。"
+        return 0
+    fi
+'''
+          if marker not in s:
+              raise SystemExit('AriaNg version marker not found')
+          s = s.replace(marker, replacement, 1)
+
+          p.write_text(s)
+      - name: Validate and commit
+        shell: bash
+        run: |
+          bash -n openlist.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add openlist.sh
+          git rm .github/workflows/auto-update-ariang-logic.yml
+          git commit -m 'fix: auto-detect and update AriaNg releases'
+          git push
