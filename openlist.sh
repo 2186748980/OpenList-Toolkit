@@ -457,44 +457,86 @@ logs(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then 
 aria2_logs(){ [ -f "$ARIA2_LOG" ] && tail -n 100 "$ARIA2_LOG" || warn '暂无 aria2 日志。'; }
 tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
 
+
+aria2_menu(){
+    while true; do
+        clear
+        line
+        center 'aria2 管理'
+        line
+
+        aria2_running && \
+            echo -e "${CY}aria2 状态${R}：${GR}运行中${R}" || \
+            echo -e "${CY}aria2 状态${R}：${RE}未运行${R}"
+
+        echo "RPC 地址：http://127.0.0.1:6800"
+        echo "RPC 密钥文件：$ARIA2_SECRET_FILE"
+
+        line
+        echo '1. 启动 aria2'
+        echo '2. 停止 aria2'
+        echo '3. 重启 aria2'
+        echo '4. 查看 aria2 状态'
+        echo '5. 查看 aria2 日志'
+        echo '6. 编辑 aria2 配置文件'
+        echo '7. 更新 aria2 BT Tracker'
+        echo '0. 返回主菜单'
+        line
+
+        printf '请选择：'
+        read -r c
+        echo
+
+        case "$c" in
+            1) start_aria2; pause_menu ;;
+            2) stop_aria2; pause_menu ;;
+            3) stop_aria2; start_aria2; pause_menu ;;
+            4) clear; aria2_running && echo -e "aria2 状态：${GR}运行中${R}" || echo -e "aria2 状态：${RE}未运行${R}"; pause_menu ;;
+            5) clear; aria2_logs; pause_menu ;;
+            6) edit_aria2_config; pause_menu ;;
+            7) update_tracker; pause_menu ;;
+            0) break ;;
+            *) warn '无效选项。'; sleep 0.5 ;;
+        esac
+    done
+}
+
 more(){
     while true; do
         clear; line; center '更多功能'; line
         echo -e "${GR}1.${R} 修改 OpenList 密码"
         echo -e "${YE}2.${R} 编辑 OpenList 配置文件"
-        echo -e "${LI}3.${R} 编辑 aria2 配置文件"
-        echo -e "${CY}4.${R} 更新 aria2 BT Tracker"
-        echo -e "${MA}5.${R} 更新管理脚本"
-        echo -e "${RE}6.${R} 备份/还原 OpenList 数据"
-        echo -e "${OR}7.${R} 开启 OpenList 外网访问"
-        echo -e "${PI}8.${R} 停止 OpenList 外网访问"
-        echo -e "${LI}9.${R} 查看 Cloudflare Tunnel 日志"
-        echo -e "${CY}10.${R} 开启每日自动更新"
-        echo -e "${CY}11.${R} 关闭每日自动更新"
-        echo -e "${GR}12.${R} 网络访问地址 / IP 检测"
-        echo -e "${GR}13.${R} 生成 OpenList 访问二维码"
-        echo -e "${CY}14.${R} 环境与依赖检查"
-        echo -e "${OR}15.${R} 开启开机自启 + 异常自动恢复"
-        echo -e "${RE}16.${R} 关闭开机自启 + 异常自动恢复"
+        echo -e "${MA}1.${R} 修改 OpenList 密码"
+        echo -e "${YE}2.${R} 编辑 OpenList 配置文件"
+        echo -e "${MA}3.${R} 更新管理脚本"
+        echo -e "${RE}4.${R} 备份/还原 OpenList 数据"
+        echo -e "${OR}5.${R} 开启 OpenList 外网访问"
+        echo -e "${PI}6.${R} 停止 OpenList 外网访问"
+        echo -e "${LI}7.${R} 查看 Cloudflare Tunnel 日志"
+        echo -e "${CY}8.${R} 开启每日自动更新"
+        echo -e "${CY}9.${R} 关闭每日自动更新"
+        echo -e "${GR}10.${R} 网络访问地址 / IP 检测"
+        echo -e "${GR}11.${R} 生成 OpenList 访问二维码"
+        echo -e "${CY}12.${R} 环境与依赖检查"
+        echo -e "${OR}13.${R} 开启开机自启 + 异常自动恢复"
+        echo -e "${RE}14.${R} 关闭开机自启 + 异常自动恢复"
         echo -e "${GRY}0.${R} 返回主菜单"
-        line; printf '请输入选项 (0-16)：'; read -r c
+        line; printf '请输入选项 (0-14)：'; read -r c
         case "$c" in
             1) reset_password; pause_menu;;
             2) edit_openlist_config; pause_menu;;
-            3) edit_aria2_config; pause_menu;;
-            4) update_tracker; pause_menu;;
-            5) self_update; pause_menu;;
-            6) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;;
-            7) setup_cloudflare; pause_menu;;
-            8) stop_cloudflare; pause_menu;;
-            9) clear; tunnel_logs; pause_menu;;
-            10) setup_nightly; pause_menu;;
-            11) remove_nightly; pause_menu;;
-            12) clear; network_status; pause_menu;;
-            13) clear; show_qr; pause_menu;;
-            14) clear; check_environment; pause_menu;;
-            15) setup_boot; pause_menu;;
-            16) remove_boot; pause_menu;;
+            3) self_update; pause_menu;;
+            4) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;;
+            5) setup_cloudflare; pause_menu;;
+            6) stop_cloudflare; pause_menu;;
+            7) clear; tunnel_logs; pause_menu;;
+            8) setup_nightly; pause_menu;;
+            9) remove_nightly; pause_menu;;
+            10) clear; network_status; pause_menu;;
+            11) clear; show_qr; pause_menu;;
+            12) clear; check_environment; pause_menu;;
+            13) setup_boot; pause_menu;;
+            14) remove_boot; pause_menu;;
             0) break;;
             *) warn '无效选项。'; sleep 0.5;;
         esac
@@ -523,8 +565,12 @@ menu(){
         fi
 
         running && \
-            echo -e "${CY}状态${R}：${GR}运行中${R}" || \
-            echo -e "${CY}状态${R}：${RE}未运行${R}"
+            echo -e "${CY}OpenList 状态${R}：${GR}运行中${R}" || \
+            echo -e "${CY}OpenList 状态${R}：${RE}未运行${R}"
+
+        aria2_running && \
+            echo -e "${CY}aria2 状态${R}：${GR}运行中${R}" || \
+            echo -e "${CY}aria2 状态${R}：${RE}未运行${R}"
 
         # 当前本机访问地址
         if running; then
@@ -558,7 +604,8 @@ EOF
         echo '6. 查看状态'
         echo '7. 查看 OpenList 日志'
         echo '8. 备份数据'
-        echo '9. 更多功能'
+        echo '9. aria2 管理'
+        echo '10. 更多功能'
         echo '0. 退出'
         line
 
@@ -575,7 +622,8 @@ EOF
             6) status; pause_menu ;;
             7) logs; pause_menu ;;
             8) backup_data; pause_menu ;;
-            9) more ;;
+            9) aria2_menu ;;
+            10) more ;;
             0) exit 0 ;;
             *) warn '无效选项。'; sleep 0.5 ;;
         esac
