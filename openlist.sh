@@ -149,10 +149,43 @@ install_openlist(){
     running && stop_openlist >/dev/null 2>&1 || true; cp "$file" "$BINARY"; chmod +x "$BINARY"; "$BINARY" version >/dev/null 2>&1 || { err 'OpenList 可执行文件验证失败。'; rm -f "$BINARY"; rm -rf "$tmp"; return 1; }; printf '%s\n' "$v" > "$VERSION_FILE"; printf '%s\n' "$v" > "$VERSION_CACHE"; rm -rf "$tmp"; install_service; ok "OpenList $v 安装完成。"
 }
 update_openlist(){ [ -x "$BINARY" ] || { install_openlist; return; }; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(upstream_version)"; info "当前：${cur:-未知}  最新：${latest:-未知}"; [ -n "$latest" ] || { err '无法获取上游版本。'; return 1; }; [ "$cur" = "$latest" ] && { ok '已经是最新版本。'; return; }; install_openlist; }
+offer_start_aria2_ariang(){
+    [ -t 0 ] || return 0
+    printf '是否同时启动 aria2 和 AriaNg？(y/n)：'
+    read -r c
+    [[ "$c" =~ ^[Yy]$ ]] || return 0
+    echo
+    info '正在启动 aria2...'
+    start_aria2
+    echo
+    info '正在启动 AriaNg...'
+    start_ariang
+}
 start_openlist(){
     rm -f "$MANUAL_STOP_FILE"; mkdirs; [ -x "$BINARY" ] || { err 'OpenList 尚未安装，请先选择 1。'; return 1; }
-    if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl start openlist-toolkit.service && ok 'OpenList 已启动。' || err '启动失败，请查看日志。'; return; fi
-    running && { warn 'OpenList 已经在运行。'; return; }; nohup "$BINARY" server --data "$DATA_DIR" >"$LOG_DIR/openlist.log" 2>&1 & local p=$!; printf '%s\n' "$p" > "$PID_FILE"; sleep 0.5; running && ok "OpenList 已启动，PID：$p" || { err '启动失败，请查看日志。'; rm -f "$PID_FILE"; }
+    if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then
+        if systemctl start openlist-toolkit.service; then
+            ok 'OpenList 已启动。'
+            offer_start_aria2_ariang
+        else
+            err '启动失败，请查看日志。'
+            return 1
+        fi
+        return
+    fi
+    running && { warn 'OpenList 已经在运行。'; return; }
+    nohup "$BINARY" server --data "$DATA_DIR" >"$LOG_DIR/openlist.log" 2>&1 & local p=$!
+    printf '%s
+' "$p" > "$PID_FILE"
+    sleep 0.5
+    if running; then
+        ok "OpenList 已启动，PID：$p"
+        offer_start_aria2_ariang
+    else
+        err '启动失败，请查看日志。'
+        rm -f "$PID_FILE"
+        return 1
+    fi
 }
 stop_openlist(){ : > "$MANUAL_STOP_FILE"; if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true; ok 'OpenList 已停止。'; return; fi; if [ -f "$PID_FILE" ]; then local p="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$PID_FILE"; fi; ok 'OpenList 已停止。'; }
 restart_openlist(){ stop_openlist; start_openlist; }
