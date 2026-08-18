@@ -326,7 +326,7 @@ setup_aria2(){
     if ! has aria2c; then if is_termux && has pkg; then pkg install -y aria2 || return 1; else err '未检测到 aria2c，请先安装 aria2。'; return 1; fi; fi
     mkdirs; if [ ! -f "$ARIA2_SECRET_FILE" ]; then printf '%b' "${CY}请输入 aria2 RPC 密钥：${R}"; read -r s; [ -n "$s" ] || s='change-me'; printf '%s\n' "$s" > "$ARIA2_SECRET_FILE"; chmod 600 "$ARIA2_SECRET_FILE"; fi
     local secret="$(cat "$ARIA2_SECRET_FILE")"; if [ ! -f "$ARIA2_CONF" ]; then cat > "$ARIA2_CONF" <<EOF
-rpc=true
+enable-rpc=true
 rpc-listen-all=true
 rpc-listen-port=6800
 rpc-secret=$secret
