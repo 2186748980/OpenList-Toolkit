@@ -283,6 +283,27 @@ EOF
 }
 stop_cloudflare(){ tunnel_running && pkill -f 'cloudflared.*tunnel.*run' || true; ok 'Cloudflare Tunnel 已停止。'; }
 tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
+auto_update_toolkit(){
+    [ -t 0 ] || return 0
+    local latest src choice
+    latest="$(toolkit_version)"
+    [ -n "$latest" ] || return 0
+    [ "$TOOLKIT_VERSION" = "$latest" ] && return 0
+    src="${BASH_SOURCE[0]}"
+    if [ -d "$(dirname "$src")/.git" ] && has git && [ -n "$(git -C "$(dirname "$src")" status --porcelain 2>/dev/null)" ]; then
+        warn '检测到 Toolkit 本地有未提交修改，已跳过自动更新。'
+        return 0
+    fi
+    echo
+    warn "发现 Toolkit 新版本：v$latest（当前 v$TOOLKIT_VERSION）"
+    printf '是否立即更新？(Y/n)：'
+    read -r choice
+    [[ "$choice" =~ ^[Nn]$ ]] && return 0
+    self_update || return 0
+    echo
+    info '正在重新加载最新 Toolkit...'
+    exec "$src"
+}
 self_update(){ local latest tmp src url; latest="$(toolkit_version)"; [ -n "$latest" ] || { err '无法获取 Toolkit 最新版本。'; return 1; }; info "当前 Toolkit：v$TOOLKIT_VERSION  最新：v$latest"; [ "$TOOLKIT_VERSION" = "$latest" ] && { ok 'Toolkit 已是最新版本。'; return; }; tmp="$(mktemp)"; src="${BASH_SOURCE[0]}"; url="https://raw.githubusercontent.com/$REPO/main/openlist.sh"; if has curl; then curl -fsSL --retry 3 "$url" -o "$tmp"; else wget -qO "$tmp" "$url"; fi; [ -s "$tmp" ] || { err '下载 Toolkit 更新失败。'; rm -f "$tmp"; return 1; }; chmod +x "$tmp"; mv "$tmp" "$src"; mkdir -p "$(dirname "$SHORTCUT")"; cp "$src" "$SHORTCUT" 2>/dev/null || true; chmod +x "$SHORTCUT" 2>/dev/null || true; ok "Toolkit 已更新为 v$latest。请重新运行 oplist。"; }
 setup_nightly(){ if systemd && root; then local svc=/etc/systemd/system/openlist-toolkit-update.service timer=/etc/systemd/system/openlist-toolkit-update.timer; cat > "$svc" <<EOF
 [Unit]
@@ -336,5 +357,5 @@ EOF
 }
 mkdirs
 case "${1:-}" in
-  --install) install_openlist;; --update) update_openlist;; --start) start_openlist;; --stop) stop_openlist;; --restart) restart_openlist;; --status) status;; --network) network_status;; --check) check_environment;; --qr) show_qr;; --setup-boot) setup_boot;; --remove-boot) remove_boot;; --watchdog) while [ -f "$WATCHDOG_ENABLED" ]; do [ -f "$MANUAL_STOP_FILE" ] || { running || start_openlist >/dev/null 2>&1 || true; }; sleep 30; done;; --logs) logs;; --aria2-start) start_aria2;; --aria2-stop) stop_aria2;; --backup) backup_data;; --self-update|--update-toolkit) self_update;; --setup-nightly-update) setup_nightly;; --remove-nightly-update) remove_nightly;; *) mkdir -p "$(dirname "$SHORTCUT")"; [ "${BASH_SOURCE[0]}" = "$SHORTCUT" ] || { cp "${BASH_SOURCE[0]}" "$SHORTCUT" 2>/dev/null || true; }; chmod +x "$SHORTCUT" 2>/dev/null || true; check_version_bg; menu;;
+  --install) install_openlist;; --update) update_openlist;; --start) start_openlist;; --stop) stop_openlist;; --restart) restart_openlist;; --status) status;; --network) network_status;; --check) check_environment;; --qr) show_qr;; --setup-boot) setup_boot;; --remove-boot) remove_boot;; --watchdog) while [ -f "$WATCHDOG_ENABLED" ]; do [ -f "$MANUAL_STOP_FILE" ] || { running || start_openlist >/dev/null 2>&1 || true; }; sleep 30; done;; --logs) logs;; --aria2-start) start_aria2;; --aria2-stop) stop_aria2;; --backup) backup_data;; --self-update|--update-toolkit) self_update;; --setup-nightly-update) setup_nightly;; --remove-nightly-update) remove_nightly;; *) mkdir -p "$(dirname "$SHORTCUT")"; [ "${BASH_SOURCE[0]}" = "$SHORTCUT" ] || { cp "${BASH_SOURCE[0]}" "$SHORTCUT" 2>/dev/null || true; }; chmod +x "$SHORTCUT" 2>/dev/null || true; auto_update_toolkit; check_version_bg; menu;;
 esac
