@@ -2,12 +2,12 @@
 set -u
 
 # OpenList Toolkit - merged/cleaned for Termux and Linux
-TOOLKIT_VERSION="0.6.1"
 # TOOLKIT_FEATURES_V061
 REPO="2186748980/OpenList-Toolkit"
 UPSTREAM="OpenListTeam/OpenList"
 ARIANG_REPO="mayswind/AriaNg"
 HOME_DIR="${OPENLIST_HOME:-$HOME/.openlist}"
+TOOLKIT_SYNCED_HASH_FILE="$HOME_DIR/.toolkit-synced-hash"
 BIN_DIR="$HOME_DIR/bin"
 DATA_DIR="$HOME_DIR/data"
 LOG_DIR="$HOME_DIR/logs"
@@ -62,19 +62,45 @@ pause_menu(){ echo; printf '按 Enter 返回菜单……'; read -r _; }
 get_github_token(){ GITHUB_TOKEN=""; [ -f "$GITHUB_TOKEN_FILE" ] && GITHUB_TOKEN="$(cat "$GITHUB_TOKEN_FILE" 2>/dev/null || true)"; }
 api_get(){ local url="$1"; get_github_token; if has curl; then if [ -n "$GITHUB_TOKEN" ]; then curl -fsSL --retry 1 --connect-timeout 5 -H "Authorization: Bearer $GITHUB_TOKEN" "$url" 2>/dev/null || true; else curl -fsSL --retry 1 --connect-timeout 5 "$url" 2>/dev/null || true; fi; elif has wget; then wget -qO- --timeout=8 "$url" 2>/dev/null || true; fi; }
 upstream_version(){ api_get "https://api.github.com/repos/$UPSTREAM/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1; }
-toolkit_version(){ local s; s="$(api_get "https://raw.githubusercontent.com/$REPO/main/openlist.sh")"; printf '%s\n' "$s" | sed -n 's/^TOOLKIT_VERSION="\([^"]*\)"/\1/p' | head -n1; }
-check_version_bg(){ mkdirs; [ -f "$VERSION_CACHE" ] && [ "$(find "$VERSION_CACHE" -mmin -60 2>/dev/null)" ] && return 0; [ -f "$VERSION_CHECKING" ] && return 0; : > "$VERSION_CHECKING"; ( v="$(upstream_version)"; [ -n "$v" ] && printf '%s\n' "$v" > "$VERSION_CACHE"; rm -f "$VERSION_CHECKING" ) >/dev/null 2>&1 & }
-latest_version(){ [ -s "$VERSION_CACHE" ] && cat "$VERSION_CACHE" || echo "检测中"; }
-running(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl is-active --quiet openlist-toolkit.service; return $?; fi; [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; }
-aria2_running(){ [ -f "$ARIA2_PID_FILE" ] && kill -0 "$(cat "$ARIA2_PID_FILE" 2>/dev/null)" 2>/dev/null; }
-ariang_running(){ [ -f "$ARIANG_PID_FILE" ] && kill -0 "$(cat "$ARIANG_PID_FILE" 2>/dev/null)" 2>/dev/null; }
-tunnel_running(){ has pgrep && pgrep -f 'cloudflared.*tunnel.*run' >/dev/null 2>&1; }
-local_ips(){
-    if ! has ifconfig; then return 0; fi
-    ifconfig 2>/dev/null | awk '
-        /^[a-zA-Z0-9_.-]+:/ { iface=$1; sub(/:$/, "", iface); next }
-        /inet / { ip=$2; if (ip == "127.0.0.1") next; if (iface ~ /^tun[0-9]*$/) next; if (iface ~ /^ccmni[0-9]*$/) next; if (iface ~ /^lo$/) next; if (ip ~ /^169.254./) next; print iface "|" ip }
-    '
+sha256_of(){ if has sha256sum; then sha256sum | awk '{print $1}'; elif has shasum; then shasum -a 256 | awk '{print $1}'; elif has openssl; then openssl dgst -sha256 | awk '{print $NF}'; else echo ''; fi; }
+toolkit_remote_code(){ api_get "https://raw.githubusercontent.com/$REPO/main/openlist.sh"; }
+toolkit_local_code(){ cat "${BASH_SOURCE[0]}" 2>/dev/null; }
+toolkit_hash(){ printf '%s' "$1" | sha256_of; }
+toolkit_build_id(){ local h; h="$(toolkit_hash "$(toolkit_local_code)")"; [ -n "$h" ] && printf '%s
+' "${h:0:7}" || echo 'dev'; }
+apply_toolkit_code(){
+    local remote_content="$1" remote_hash="$2" tmp src
+    src="${BASH_SOURCE[0]}"
+    tmp="$(mktemp)"
+
+    printf '%s
+' "$remote_content" > "$tmp"
+
+    head -n1 "$tmp" | grep -q '^#!' || {
+        err '云端代码 校验失败，已取消同步。'
+        rm -f "$tmp"
+        return 1
+    }
+
+    [ "$(wc -c < "$tmp")" -gt 500 ] || {
+        err '云端代码 内容异常，已取消同步。'
+        rm -f "$tmp"
+        return 1
+    }
+
+    chmod +x "$tmp"
+    cp "$tmp" "$src"
+
+    mkdir -p "$(dirname "$SHORTCUT")"
+    cp "$tmp" "$SHORTCUT" 2>/dev/null || true
+    chmod +x "$SHORTCUT" 2>/dev/null || true
+
+    rm -f "$tmp"
+
+    printf '%s
+' "$remote_hash" > "$TOOLKIT_SYNCED_HASH_FILE"
+
+    ok 'Toolkit 代码已同步为 GitHub main 最新版本。'
 }
 network_status(){
     echo "网络访问："; if ! running; then echo "  OpenList 当前未运行"; return 0; fi
@@ -285,56 +311,72 @@ stop_cloudflare(){ tunnel_running && pkill -f 'cloudflared.*tunnel.*run' || true
 tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
 auto_update_toolkit(){
     [ -t 0 ] || return 0
-    local latest src choice
-    latest="$(toolkit_version)"
-    [ -n "$latest" ] || return 0
-    [ "$TOOLKIT_VERSION" = "$latest" ] && return 0
+
+    local src remote_content remote_hash local_hash last_synced choice
+
     src="${BASH_SOURCE[0]}"
-    if [ -d "$(dirname "$src")/.git" ] && has git && [ -n "$(git -C "$(dirname "$src")" status --porcelain 2>/dev/null)" ]; then
-        warn '检测到 Toolkit 本地有未提交修改，已跳过自动更新。'
+    [ -f "$src" ] || return 0
+
+    remote_content="$(toolkit_remote_code)"
+    [ -n "$remote_content" ] || return 0
+
+    remote_hash="$(toolkit_hash "$remote_content")"
+    local_hash="$(toolkit_hash "$(toolkit_local_code)")"
+
+    [ -n "$remote_hash" ] && [ "$remote_hash" = "$local_hash" ] && return 0
+
+    last_synced="$(cat "$TOOLKIT_SYNCED_HASH_FILE" 2>/dev/null || true)"
+
+    if [ -n "$last_synced" ] && [ "$local_hash" != "$last_synced" ]; then
+        warn '检测到本地 Toolkit 代码被手动修改，已跳过自动同步（避免覆盖你的改动）。'
         return 0
     fi
+
     echo
-    warn "发现 Toolkit 新版本：v$latest（当前 v$TOOLKIT_VERSION）"
-    printf '是否立即更新？(Y/n)：'
+    warn '检测到 GitHub main 分支的 Toolkit 代码已更新。'
+    printf '是否立即同步最新代码？(Y/n)：'
     read -r choice
-    [[ "$choice" =~ ^[Nn]$ ]] && return 0
-    self_update || return 0
+
+    case "$choice" in
+        n|N) return 0 ;;
+    esac
+
+    info '正在与 GitHub main 分支比对 Toolkit 代码...'
+    apply_toolkit_code "$remote_content" "$remote_hash"
+
     echo
-    info '正在重新加载最新 Toolkit...'
-    exec "$src"
+    info '请重新运行 oplist 以加载最新 Toolkit。'
 }
-self_update(){ local latest tmp src url; latest="$(toolkit_version)"; [ -n "$latest" ] || { err '无法获取 Toolkit 最新版本。'; return 1; }; info "当前 Toolkit：v$TOOLKIT_VERSION  最新：v$latest"; [ "$TOOLKIT_VERSION" = "$latest" ] && { ok 'Toolkit 已是最新版本。'; return; }; tmp="$(mktemp)"; src="${BASH_SOURCE[0]}"; url="https://raw.githubusercontent.com/$REPO/main/openlist.sh"; if has curl; then curl -fsSL --retry 3 "$url" -o "$tmp"; else wget -qO "$tmp" "$url"; fi; [ -s "$tmp" ] || { err '下载 Toolkit 更新失败。'; rm -f "$tmp"; return 1; }; chmod +x "$tmp"; mv "$tmp" "$src"; mkdir -p "$(dirname "$SHORTCUT")"; cp "$src" "$SHORTCUT" 2>/dev/null || true; chmod +x "$SHORTCUT" 2>/dev/null || true; ok "Toolkit 已更新为 v$latest。请重新运行 oplist。"; }
-setup_nightly(){ if systemd && root; then local svc=/etc/systemd/system/openlist-toolkit-update.service timer=/etc/systemd/system/openlist-toolkit-update.timer; cat > "$svc" <<EOF
-[Unit]
-Description=OpenList Toolkit nightly update
-After=network-online.target
-[Service]
-Type=oneshot
-ExecStart=$SHORTCUT --update
-EOF
-cat > "$timer" <<EOF
-[Unit]
-Description=OpenList Toolkit nightly update timer
-[Timer]
-OnCalendar=*-*-* 03:30:00
-Persistent=true
-RandomizedDelaySec=15m
-[Install]
-WantedBy=timers.target
-EOF
-systemctl daemon-reload; systemctl enable --now openlist-toolkit-update.timer >/dev/null 2>&1 || true; ok '已开启每日凌晨自动更新。'; elif is_termux; then mkdir -p "$HOME/.termux/boot"; cat > "$HOME/.termux/boot/openlist-toolkit.sh" <<EOF
-#!/data/data/com.termux/files/usr/bin/bash
-sleep 60
-$SHORTCUT --update >/dev/null 2>&1 || true
-EOF
-chmod +x "$HOME/.termux/boot/openlist-toolkit.sh"; ok '已写入 Termux:Boot 自动更新脚本。'; else warn '当前环境不支持自动更新。'; fi; }
-remove_nightly(){ if systemd && root; then systemctl disable --now openlist-toolkit-update.timer >/dev/null 2>&1 || true; rm -f /etc/systemd/system/openlist-toolkit-update.timer /etc/systemd/system/openlist-toolkit-update.service; systemctl daemon-reload; elif is_termux; then rm -f "$HOME/.termux/boot/openlist-toolkit.sh"; fi; ok '已关闭自动更新。'; }
-status(){
-    echo -e "${MA}OpenList Toolkit${R}：v$TOOLKIT_VERSION"; echo "系统：$(os_name)"; echo "架构：$(arch)"; echo "安装目录：$HOME_DIR"; echo "OpenList：$(cat "$VERSION_FILE" 2>/dev/null || echo 未安装)"; running && echo -e "OpenList 状态：${GR}运行中${R}" || echo -e "OpenList 状态：${RE}未运行${R}"; echo "本机访问：http://127.0.0.1:$LOCAL_PORT"; while IFS="|" read -r iface ip; do [ -n "$ip" ] || continue; case "$iface" in ap*) echo "热点访问：http://$ip:$LOCAL_PORT";; wlan*) echo "Wi-Fi访问：http://$ip:$LOCAL_PORT";; *) echo "局域网访问：http://$ip:$LOCAL_PORT";; esac; done <<EOF
-$(local_ips)
-EOF
-    aria2_running && echo -e "aria2 状态：${GR}运行中${R}" || echo -e "aria2 状态：${RE}未运行${R}"; ariang_running && echo -e "AriaNg 状态：${GR}运行中${R}" || echo -e "AriaNg 状态：${RE}未运行${R}"; tunnel_running && echo -e "Cloudflare Tunnel 状态：${GR}运行中${R}" || echo -e "Cloudflare Tunnel 状态：${RE}未运行${R}"
+self_update(){
+    local remote_content remote_hash local_hash src
+
+    src="${BASH_SOURCE[0]}"
+
+    remote_content="$(toolkit_remote_code)"
+    [ -n "$remote_content" ] || {
+        err '无法获取 GitHub main 最新 Toolkit。'
+        return 1
+    }
+
+    remote_hash="$(toolkit_hash "$remote_content")"
+    local_hash="$(toolkit_hash "$(toolkit_local_code)")"
+
+    [ -n "$remote_hash" ] || {
+        err '无法计算远程 Toolkit 哈希。'
+        return 1
+    }
+
+    if [ "$remote_hash" = "$local_hash" ]; then
+        info "当前 Toolkit：$(toolkit_build_id)"
+        ok 'Toolkit 已是最新版本。'
+        return 0
+    fi
+
+    info '正在与 GitHub main 分支比对 Toolkit 代码...'
+
+    apply_toolkit_code "$remote_content" "$remote_hash" || return 1
+
+    info '请重新运行 oplist 以加载最新 Toolkit。'
 }
 logs(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then journalctl -u openlist-toolkit.service -n 100 --no-pager; elif [ -f "$LOG_DIR/openlist.log" ]; then tail -n 100 "$LOG_DIR/openlist.log"; else warn '暂无 OpenList 日志。'; fi; }
 more(){
