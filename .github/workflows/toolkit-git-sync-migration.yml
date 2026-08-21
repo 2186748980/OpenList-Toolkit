@@ -28,7 +28,6 @@ jobs:
 
           if 'TOOLKIT_GIT_CACHE=' not in s:
               s = s.replace('REPO="2186748980/OpenList-Toolkit"\n', 'REPO="2186748980/OpenList-Toolkit"\nSCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\nTOOLKIT_GIT_CACHE="$HOME/.openlist/latest-toolkit-commit"\n', 1)
-
           s = re.sub(r'^TOOLKIT_VERSION="[^"]*"$', 'TOOLKIT_VERSION="git-sync"', s, count=1, flags=re.M)
 
           s, n = re.subn(r'(?ms)^toolkit_version\(\)\{.*?^\}\ncheck_version_bg\(\)\{.*?^\}\nlatest_version\(\)\{.*?^\}', '''toolkit_version(){
@@ -53,9 +52,7 @@ latest_version(){
           if n != 1:
               raise SystemExit('Failed to replace toolkit version/check functions')
 
-          # Replace the Toolkit self-update function only. Keep OpenList updater unchanged.
-          pat = r'(?ms)^self_update\(\)\{.*?^\}\n'
-          replacement = '''self_update(){
+          s, n = re.subn(r'(?ms)^self_update\(\)\{.*?^\}\n', '''self_update(){
     [ -d "$SCRIPT_DIR/.git" ] || { err "当前 Toolkit 目录不是 Git 仓库，无法同步云端代码。"; return 1; }
     has git || { err "未安装 git，无法检测云端代码变动。"; return 1; }
     info "正在检测 GitHub 云端代码变动..."
@@ -74,28 +71,9 @@ latest_version(){
     ok "Toolkit 已同步到云端最新代码：${remote:0:7}"
     info "请重新运行脚本以使用最新代码。"
 }
-'''
-          s, n = re.subn(pat, replacement, s, count=1)
-          if n != 1:
-              raise SystemExit('Failed to replace self_update()')
-
-          # Remove the obsolete raw-version comparison block inside auto_update_toolkit.
-          s, n = re.subn(r'(?ms)^auto_update_toolkit\(\)\{.*?^\}\n', '''auto_update_toolkit(){
-    [ -d "$SCRIPT_DIR/.git" ] && has git || return 0
-    local cur remote
-    git -C "$SCRIPT_DIR" fetch --quiet origin main >/dev/null 2>&1 || return 0
-    cur="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
-    remote="$(git -C "$SCRIPT_DIR" rev-parse origin/main 2>/dev/null || true)"
-    [ -n "$remote" ] && [ "$cur" != "$remote" ] || return 0
-    warn "发现 Toolkit 云端代码更新：${cur:0:7} → ${remote:0:7}"
-    git -C "$SCRIPT_DIR" reset --hard origin/main >/dev/null 2>&1 || { err "Toolkit 云端代码同步失败。"; return 1; }
-    ok "Toolkit 已同步到云端最新代码：${remote:0:7}"
-    info "正在使用最新代码重新启动..."
-    exec "$SCRIPT_DIR/openlist.sh" "$@"
-}
 ''', s, count=1)
           if n != 1:
-              print('auto_update_toolkit() not found; leaving it unchanged')
+              raise SystemExit('Failed to replace self_update()')
 
           p.write_text(s)
 
