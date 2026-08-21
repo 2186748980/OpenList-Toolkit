@@ -12,21 +12,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Restore known-good Toolkit and add missing helpers
+      - name: Restore known-good Toolkit
         shell: bash
         run: |
           set -e
           git show 6f59019a09c5c6106468f2379b9bfb0c898bb012:openlist.sh > openlist.sh
-          python3 - <<'PY'
+          python3 <<'PY'
           from pathlib import Path
           p = Path('openlist.sh')
           s = p.read_text()
-          marker = 'upstream_version(){ api_get "https://api.github.com/repos/$UPSTREAM/releases/latest" | sed -n '\''s/.*"tag_name"[[:space:]]*:[[:space:]]*"\\([^"\\]*\\)".*/\\1/p'\'' | head -n1; }\n'
-          helpers = '''check_version_bg(){ mkdirs; [ -f "$VERSION_CACHE" ] && [ "$(find "$VERSION_CACHE" -mmin -60 2>/dev/null)" ] && return 0; [ -f "$VERSION_CHECKING" ] && return 0; : > "$VERSION_CHECKING"; ( v="$(upstream_version)"; [ -n "$v" ] && printf '%s\\n' "$v" > "$VERSION_CACHE"; rm -f "$VERSION_CHECKING" ) >/dev/null 2>&1 & }\nlatest_version(){ [ -s "$VERSION_CACHE" ] && cat "$VERSION_CACHE" || echo "检测中"; }\nrunning(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl is-active --quiet openlist-toolkit.service; return $?; fi; [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; }\naria2_running(){ [ -f "$ARIA2_PID_FILE" ] && kill -0 "$(cat "$ARIA2_PID_FILE" 2>/dev/null)" 2>/dev/null; }\nariang_running(){ [ -f "$ARIANG_PID_FILE" ] && kill -0 "$(cat "$ARIANG_PID_FILE" 2>/dev/null)" 2>/dev/null; }\ntunnel_running(){ has pgrep && pgrep -f '\''cloudflared.*tunnel.*run'\'' >/dev/null 2>&1; }\nlocal_ips(){\n    if ! has ifconfig; then return 0; fi\n    ifconfig 2>/dev/null | awk '\''\n        /^[a-zA-Z0-9_.-]+:/ { iface=$1; sub(/:$/, "", iface); next }\n        /inet / { ip=$2; if (ip == "127.0.0.1") next; if (iface ~ /^tun[0-9]*$/) next; if (iface ~ /^ccmni[0-9]*$/) next; if (iface ~ /^lo$/) next; if (ip ~ /^169.254./) next; print iface "|" ip }\n    '\''\n}\n'''
+          helpers = r'''check_version_bg(){ mkdirs; [ -f "$VERSION_CACHE" ] && [ "$(find "$VERSION_CACHE" -mmin -60 2>/dev/null)" ] && return 0; [ -f "$VERSION_CHECKING" ] && return 0; : > "$VERSION_CHECKING"; ( v="$(upstream_version)"; [ -n "$v" ] && printf '%s\n' "$v" > "$VERSION_CACHE"; rm -f "$VERSION_CHECKING" ) >/dev/null 2>&1 & }
+latest_version(){ [ -s "$VERSION_CACHE" ] && cat "$VERSION_CACHE" || echo "检测中"; }
+running(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl is-active --quiet openlist-toolkit.service; return $?; fi; [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; }
+aria2_running(){ [ -f "$ARIA2_PID_FILE" ] && kill -0 "$(cat "$ARIA2_PID_FILE" 2>/dev/null)" 2>/dev/null; }
+ariang_running(){ [ -f "$ARIANG_PID_FILE" ] && kill -0 "$(cat "$ARIANG_PID_FILE" 2>/dev/null)" 2>/dev/null; }
+tunnel_running(){ has pgrep && pgrep -f 'cloudflared.*tunnel.*run' >/dev/null 2>&1; }
+local_ips(){
+    if ! has ifconfig; then return 0; fi
+    ifconfig 2>/dev/null | awk '
+        /^[a-zA-Z0-9_.-]+:/ { iface=$1; sub(/:$/, "", iface); next }
+        /inet / { ip=$2; if (ip == "127.0.0.1") next; if (iface ~ /^tun[0-9]*$/) next; if (iface ~ /^ccmni[0-9]*$/) next; if (iface ~ /^lo$/) next; if (ip ~ /^169.254./) next; print iface "|" ip }
+    '
+}
+'''
           if 'latest_version(){' not in s:
-              if marker not in s:
-                  raise SystemExit('upstream_version marker not found')
-              s = s.replace(marker, marker + helpers, 1)
+              s = s.replace('sha256_of(){', helpers + 'sha256_of(){', 1)
           p.write_text(s)
           PY
           bash -n openlist.sh
