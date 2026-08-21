@@ -62,44 +62,38 @@ pause_menu(){ echo; printf '按 Enter 返回菜单……'; read -r _; }
 get_github_token(){ GITHUB_TOKEN=""; [ -f "$GITHUB_TOKEN_FILE" ] && GITHUB_TOKEN="$(cat "$GITHUB_TOKEN_FILE" 2>/dev/null || true)"; }
 api_get(){ local url="$1"; get_github_token; if has curl; then if [ -n "$GITHUB_TOKEN" ]; then curl -fsSL --retry 1 --connect-timeout 5 -H "Authorization: Bearer $GITHUB_TOKEN" "$url" 2>/dev/null || true; else curl -fsSL --retry 1 --connect-timeout 5 "$url" 2>/dev/null || true; fi; elif has wget; then wget -qO- --timeout=8 "$url" 2>/dev/null || true; fi; }
 upstream_version(){ api_get "https://api.github.com/repos/$UPSTREAM/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1; }
+check_version_bg(){ mkdirs; [ -f "$VERSION_CACHE" ] && [ "$(find "$VERSION_CACHE" -mmin -60 2>/dev/null)" ] && return 0; [ -f "$VERSION_CHECKING" ] && return 0; : > "$VERSION_CHECKING"; ( v="$(upstream_version)"; [ -n "$v" ] && printf '%s\n' "$v" > "$VERSION_CACHE"; rm -f "$VERSION_CHECKING" ) >/dev/null 2>&1 & }
+latest_version(){ [ -s "$VERSION_CACHE" ] && cat "$VERSION_CACHE" || echo "检测中"; }
+running(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl is-active --quiet openlist-toolkit.service; return $?; fi; [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; }
+aria2_running(){ [ -f "$ARIA2_PID_FILE" ] && kill -0 "$(cat "$ARIA2_PID_FILE" 2>/dev/null)" 2>/dev/null; }
+ariang_running(){ [ -f "$ARIANG_PID_FILE" ] && kill -0 "$(cat "$ARIANG_PID_FILE" 2>/dev/null)" 2>/dev/null; }
+tunnel_running(){ has pgrep && pgrep -f 'cloudflared.*tunnel.*run' >/dev/null 2>&1; }
+local_ips(){
+    if ! has ifconfig; then return 0; fi
+    ifconfig 2>/dev/null | awk '
+        /^[a-zA-Z0-9_.-]+:/ { iface=$1; sub(/:$/, "", iface); next }
+        /inet / { ip=$2; if (ip == "127.0.0.1") next; if (iface ~ /^tun[0-9]*$/) next; if (iface ~ /^ccmni[0-9]*$/) next; if (iface ~ /^lo$/) next; if (ip ~ /^169.254./) next; print iface "|" ip }
+    '
+}
 sha256_of(){ if has sha256sum; then sha256sum | awk '{print $1}'; elif has shasum; then shasum -a 256 | awk '{print $1}'; elif has openssl; then openssl dgst -sha256 | awk '{print $NF}'; else echo ''; fi; }
 toolkit_remote_code(){ api_get "https://raw.githubusercontent.com/$REPO/main/openlist.sh"; }
 toolkit_local_code(){ cat "${BASH_SOURCE[0]}" 2>/dev/null; }
 toolkit_hash(){ printf '%s' "$1" | sha256_of; }
-toolkit_build_id(){ local h; h="$(toolkit_hash "$(toolkit_local_code)")"; [ -n "$h" ] && printf '%s
-' "${h:0:7}" || echo 'dev'; }
+toolkit_build_id(){ local h; h="$(toolkit_hash "$(toolkit_local_code)")"; [ -n "$h" ] && printf '%s\n' "${h:0:7}" || echo 'dev'; }
 apply_toolkit_code(){
     local remote_content="$1" remote_hash="$2" tmp src
     src="${BASH_SOURCE[0]}"
     tmp="$(mktemp)"
-
-    printf '%s
-' "$remote_content" > "$tmp"
-
-    head -n1 "$tmp" | grep -q '^#!' || {
-        err '云端代码 校验失败，已取消同步。'
-        rm -f "$tmp"
-        return 1
-    }
-
-    [ "$(wc -c < "$tmp")" -gt 500 ] || {
-        err '云端代码 内容异常，已取消同步。'
-        rm -f "$tmp"
-        return 1
-    }
-
+    printf '%s\n' "$remote_content" > "$tmp"
+    head -n1 "$tmp" | grep -q '^#!' || { err '云端代码 校验失败，已取消同步。'; rm -f "$tmp"; return 1; }
+    [ "$(wc -c < "$tmp")" -gt 500 ] || { err '云端代码 内容异常，已取消同步。'; rm -f "$tmp"; return 1; }
     chmod +x "$tmp"
     cp "$tmp" "$src"
-
     mkdir -p "$(dirname "$SHORTCUT")"
     cp "$tmp" "$SHORTCUT" 2>/dev/null || true
     chmod +x "$SHORTCUT" 2>/dev/null || true
-
     rm -f "$tmp"
-
-    printf '%s
-' "$remote_hash" > "$TOOLKIT_SYNCED_HASH_FILE"
-
+    printf '%s\n' "$remote_hash" > "$TOOLKIT_SYNCED_HASH_FILE"
     ok 'Toolkit 代码已同步为 GitHub main 最新版本。'
 }
 network_status(){
@@ -201,8 +195,7 @@ start_openlist(){
     fi
     running && { warn 'OpenList 已经在运行。'; return; }
     nohup "$BINARY" server --data "$DATA_DIR" >"$LOG_DIR/openlist.log" 2>&1 & local p=$!
-    printf '%s
-' "$p" > "$PID_FILE"
+    printf '%s\n' "$p" > "$PID_FILE"
     sleep 0.5
     if running; then
         ok "OpenList 已启动，PID：$p"
@@ -219,171 +212,114 @@ setup_aria2(){
     if ! has aria2c; then if is_termux && has pkg; then pkg install -y aria2 || return 1; else err '未检测到 aria2c，请先安装 aria2。'; return 1; fi; fi
     mkdirs; if [ ! -f "$ARIA2_SECRET_FILE" ]; then printf '%b' "${CY}请输入 aria2 RPC 密钥：${R}"; read -r s; [ -n "$s" ] || s='change-me'; printf '%s\n' "$s" > "$ARIA2_SECRET_FILE"; chmod 600 "$ARIA2_SECRET_FILE"; fi
     local secret="$(cat "$ARIA2_SECRET_FILE")"; if [ ! -f "$ARIA2_CONF" ]; then cat > "$ARIA2_CONF" <<EOF
-enable-rpc=true
-rpc-listen-all=true
-rpc-listen-port=6800
-rpc-secret=$secret
-disable-ipv6=true
-enable-dht=true
-enable-peer-exchange=true
-file-allocation=none
-continue=true
-input-file=$ARIA2_DIR/aria2.session
-save-session=$ARIA2_DIR/aria2.session
-save-session-interval=60
+# aria2 configuration
+
 EOF
         touch "$ARIA2_DIR/aria2.session"; chmod 600 "$ARIA2_CONF" "$ARIA2_DIR/aria2.session"; fi
 }
-start_aria2(){ setup_aria2 || return 1; aria2_running && { warn 'aria2 已运行。'; return; }; nohup aria2c --conf-path="$ARIA2_CONF" >"$ARIA2_LOG" 2>&1 & local p=$!; printf '%s\n' "$p" > "$ARIA2_PID_FILE"; sleep 0.5; aria2_running && ok "aria2 已启动，PID：$p" || { err 'aria2 启动失败，请查看日志。'; rm -f "$ARIA2_PID_FILE"; }; }
+start_aria2(){ setup_aria2 || return 1; aria2_running && { warn 'aria2 已运行。'; return; }; nohup aria2c --conf-path="$ARIA2_CONF" >"$ARIA2_LOG" 2>&1 & local p=$!; printf '%s\n' "$p" > "$ARIA2_PID_FILE"; sleep 0.5; aria2_running && ok "aria2 已启动，PID：$p" || { err 'aria2 启动失败。'; rm -f "$ARIA2_PID_FILE"; return 1; }; }
 stop_aria2(){ if [ -f "$ARIA2_PID_FILE" ]; then local p="$(cat "$ARIA2_PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$ARIA2_PID_FILE"; fi; ok 'aria2 已停止。'; }
-edit_aria2_config(){ setup_aria2 || return; ${EDITOR:-vi} "$ARIA2_CONF"; }
-aria2_logs(){ [ -f "$ARIA2_LOG" ] && tail -n 100 "$ARIA2_LOG" || warn '暂无 aria2 日志。'; }
-update_tracker(){ setup_aria2 || return 1; local url='https://raw.githubusercontent.com/giturass/aria2.conf/refs/heads/master/tracker.sh'; if has curl; then curl -fsSL "$url" | bash -s -- "$ARIA2_CONF" || return 1; else wget -qO- "$url" | bash -s -- "$ARIA2_CONF" || return 1; fi; ok 'BT Tracker 更新完成。'; }
-
-ariang_latest(){
-    printf '%s\n' "https://github.com/mayswind/AriaNg/releases/download/1.3.14/AriaNg-1.3.14-AllInOne.zip"
-}
-install_ariang(){
-    mkdirs; local url tmp file version
-    url="$(ariang_latest)"; [ -n "$url" ] || { err '无法获取 AriaNg 最新版本。'; return 1; }
-    version="$(printf '%s' "$url" | sed -n 's#.*releases/download/\([^/]*/\)AriaNg-\([^/-]*\)-AllInOne\.zip#\2#p')"; [ -n "$version" ] || version="$(printf '%s' "$url" | sed -n 's#.*AriaNg-\([^/-]*\)-AllInOne\.zip#\1#p')"
-    tmp="$(mktemp -d)"; info "正在安装 AriaNg${version:+ v$version}..."
-    if has curl; then curl -fL --retry 3 --connect-timeout 10 "$url" -o "$tmp/ariang.zip" || { rm -rf "$tmp"; err 'AriaNg 下载失败。'; return 1; }; else wget -q "$url" -O "$tmp/ariang.zip" || { rm -rf "$tmp"; err 'AriaNg 下载失败。'; return 1; }; fi
-    rm -rf "$ARIANG_DIR"; mkdir -p "$ARIANG_DIR"
-    if has unzip; then unzip -q "$tmp/ariang.zip" -d "$ARIANG_DIR"; else has python || { rm -rf "$tmp"; err '解压 AriaNg 需要 unzip 或 Python。'; return 1; }; python - "$tmp/ariang.zip" "$ARIANG_DIR" <<'PYZIP'
-import sys,zipfile,os
-with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
-PYZIP
-    fi
-    file="$(find "$ARIANG_DIR" -type f -name '*.html' | head -n1)"; [ -n "$file" ] || { rm -rf "$tmp"; err 'AriaNg 安装包中未找到 HTML 文件。'; return 1; }; cp "$file" "$ARIANG_HTML"; printf '%s\n' "${version:-latest}" > "$ARIANG_VERSION_FILE"; rm -rf "$tmp"; ok "AriaNg ${version:+v$version }已安装。"
-}
 start_ariang(){
-    [ -f "$ARIANG_HTML" ] || install_ariang || return 1; ariang_running && { warn 'AriaNg 已运行。'; return; }
-    if ! has python && ! has python3; then err 'AriaNg Web 管理需要 Python 或其他 HTTP 服务。'; return 1; fi
-    local py='python'; has "$py" || py='python3'; nohup "$py" -m http.server "$ARIANG_PORT" --bind 0.0.0.0 --directory "$ARIANG_DIR" >"$ARIANG_LOG" 2>&1 & local p=$!; printf '%s\n' "$p" > "$ARIANG_PID_FILE"; sleep 0.5; ariang_running && ok "AriaNg 已启动，PID：$p，端口：$ARIANG_PORT" || { err 'AriaNg 启动失败，请查看日志。'; rm -f "$ARIANG_PID_FILE"; }
+    mkdirs
+    if [ ! -s "$ARIANG_HTML" ]; then
+        info '正在安装 AriaNg...'
+        local url="https://github.com/$ARIANG_REPO/releases/latest/download/AriaNg.zip" tmp="$(mktemp -d)"
+        if has curl; then curl -fL --retry 2 --connect-timeout 10 "$url" -o "$tmp/ariang.zip" || { rm -rf "$tmp"; err 'AriaNg 下载失败。'; return 1; }
+        elif has wget; then wget -qO "$tmp/ariang.zip" "$url" || { rm -rf "$tmp"; err 'AriaNg 下载失败。'; return 1; }
+        else rm -rf "$tmp"; err '需要 curl 或 wget。'; return 1; fi
+        unzip -q "$tmp/ariang.zip" -d "$ARIANG_DIR" || { rm -rf "$tmp"; err 'AriaNg 解压失败。'; return 1; }
+        rm -rf "$tmp"
+    fi
+    ariang_running && { warn 'AriaNg 已运行。'; return; }
+    if has python3; then nohup python3 -m http.server "$ARIANG_PORT" --directory "$ARIANG_DIR" >"$ARIANG_LOG" 2>&1 & local p=$!; printf '%s\n' "$p" > "$ARIANG_PID_FILE"; elif has python; then nohup python -m http.server "$ARIANG_PORT" --directory "$ARIANG_DIR" >"$ARIANG_LOG" 2>&1 & local p=$!; printf '%s\n' "$p" > "$ARIANG_PID_FILE"; else err '未找到 Python，无法启动 AriaNg。'; return 1; fi
+    sleep 0.5; ariang_running && ok "AriaNg 已启动：http://127.0.0.1:$ARIANG_PORT" || { err 'AriaNg 启动失败。'; rm -f "$ARIANG_PID_FILE"; return 1; }
 }
 stop_ariang(){ if [ -f "$ARIANG_PID_FILE" ]; then local p="$(cat "$ARIANG_PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$ARIANG_PID_FILE"; fi; ok 'AriaNg 已停止。'; }
-ariang_urls(){
-    local secret b64; secret="$(cat "$ARIA2_SECRET_FILE" 2>/dev/null || true)"; [ -n "$secret" ] || return 0
-    if has base64; then b64="$(printf '%s' "$secret" | base64 | tr -d '\n')"; else b64=""; fi
-    echo "本机 AriaNg：http://127.0.0.1:$ARIANG_PORT/"
-    while IFS="|" read -r iface ip; do
-        [ -n "$ip" ] || continue
-        case "$iface" in ap*|wlan*)
-            echo "Wi-Fi/热点 AriaNg：http://$ip:$ARIANG_PORT/"
-            [ -n "$b64" ] && echo "免配置入口：http://$ip:$ARIANG_PORT/#!/settings/rpc/set/http/$ip/6800/jsonrpc/$b64";;
-        esac
-    done <<EOF
-$(local_ips)
-EOF
-}
-ariang_logs(){ [ -f "$ARIANG_LOG" ] && tail -n 100 "$ARIANG_LOG" || warn '暂无 AriaNg 日志。'; }
 aria2_menu(){
-    while true; do clear; line; center 'aria2 管理'; line
-        aria2_running && echo -e "aria2 状态：${GR}运行中${R}" || echo -e "aria2 状态：${RE}未运行${R}"
-        echo "RPC 服务：http://127.0.0.1:6800"
-        echo "说明：RPC 地址不能直接当网页打开。"
-        if ariang_running; then echo -e "Web 管理：${GR}AriaNg 已运行${R}"; ariang_urls; else echo -e "Web 管理：${YE}AriaNg 未运行${R}"; fi
-        line
-        echo '1. 启动 aria2'; echo '2. 停止 aria2'; echo '3. 重启 aria2'; echo '4. 查看 aria2 状态'; echo '5. 查看 aria2 日志'; echo '6. 编辑 aria2 配置文件'; echo '7. 更新 aria2 BT Tracker'; echo '8. 安装/更新并启动 AriaNg'; echo '9. 停止 AriaNg'; echo '10. 查看 AriaNg 日志'; echo '0. 返回主菜单'; line; printf '请选择：'; read -r c; echo
-        case "$c" in
-            1) start_aria2; pause_menu;; 2) stop_aria2; pause_menu;; 3) stop_aria2; start_aria2; pause_menu;; 4) clear; aria2_running && echo 'aria2 状态：运行中' || echo 'aria2 状态：未运行'; pause_menu;; 5) clear; aria2_logs; pause_menu;; 6) edit_aria2_config; pause_menu;; 7) update_tracker; pause_menu;; 8) install_ariang; start_ariang; pause_menu;; 9) stop_ariang; pause_menu;; 10) clear; ariang_logs; pause_menu;; 0) break;; *) warn '无效选项。'; sleep 0.5;; esac
-    done
+    while true; do clear; line; center 'aria2 / AriaNg'; line; aria2_running && echo -e "aria2：${GR}运行中${R}" || echo -e "aria2：${RE}未运行${R}"; ariang_running && echo -e "AriaNg：${GR}运行中${R}" || echo -e "AriaNg：${RE}未运行${R}"; line; echo '1. 启动 aria2'; echo '2. 停止 aria2'; echo '3. 启动 AriaNg'; echo '4. 停止 AriaNg'; echo '5. 同时启动'; echo '6. 同时停止'; echo '0. 返回'; line; printf '请选择：'; read -r c; case "$c" in 1) start_aria2; pause_menu;; 2) stop_aria2; pause_menu;; 3) start_ariang; pause_menu;; 4) stop_ariang; pause_menu;; 5) start_aria2; start_ariang; pause_menu;; 6) stop_ariang; stop_aria2; pause_menu;; 0) break;; *) warn '无效选项。'; sleep 0.5;; esac; done
 }
-reset_password(){ local p1 p2; [ -x "$BINARY" ] || { err 'OpenList 尚未安装。'; return; }; printf '%b' "${CY}请输入新密码：${R}"; read -rs p1; echo; printf '%b' "${CY}再次输入：${R}"; read -rs p2; echo; [ "$p1" = "$p2" ] && [ -n "$p1" ] || { err '密码为空或两次输入不一致。'; return 1; }; "$BINARY" admin set "$p1" --data "$DATA_DIR" && ok 'OpenList 密码已修改。' || err '密码修改失败。'; }
-edit_openlist_config(){ local f="$DATA_DIR/config.json"; [ -f "$f" ] || { err "未找到配置文件：$f"; return; }; ${EDITOR:-vi} "$f"; }
-backup_data(){ mkdirs; local out="$BACKUP_DIR/openlist-$(date +%Y%m%d-%H%M%S).tar.gz"; tar -czf "$out" -C "$DATA_DIR" . && ok "备份完成：$out" || err '备份失败。'; }
-restore_data(){ mkdirs; local files=() f i=1 choice confirm; while IFS= read -r -d '' f; do files+=("$f"); done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'openlist-*.tar.gz' -print0 | sort -rz); [ "${#files[@]}" -gt 0 ] || { err '没有本地备份。'; return; }; echo '可用备份：'; for f in "${files[@]}"; do echo "$i. $(basename "$f")"; i=$((i+1)); done; printf '选择编号：'; read -r choice; [[ "$choice" =~ ^[0-9]+$ ]] || return; [ "$choice" -ge 1 ] && [ "$choice" -le "${#files[@]}" ] || return; f="${files[$((choice-1))]}"; printf '确认覆盖当前 data？(y/n)：'; read -r confirm; [[ "$confirm" =~ ^[Yy]$ ]] || return; stop_openlist >/dev/null 2>&1 || true; rm -rf "$DATA_DIR"; mkdir -p "$DATA_DIR"; tar -xzf "$f" -C "$DATA_DIR" && ok '恢复完成。'; }
 setup_cloudflare(){
-    has cloudflared || { if is_termux; then pkg install -y cloudflared || return 1; else err '请先安装 cloudflared。'; return 1; fi; }; mkdirs; [ -f "$CF_DIR/cert.pem" ] || cloudflared tunnel login || return 1
-    local name domain uuid cred; if [ -f "$TUNNEL_NAME_FILE" ]; then name="$(cat "$TUNNEL_NAME_FILE")"; else printf '请输入 Tunnel 名称：'; read -r name; printf '%s\n' "$name" > "$TUNNEL_NAME_FILE"; fi
-    if ! cloudflared tunnel list 2>/dev/null | grep -w "$name" >/dev/null; then cloudflared tunnel create "$name" || return 1; fi
-    uuid="$(cloudflared tunnel list 2>/dev/null | awk -v n="$name" '$0 ~ n {print $1; exit}')"; [ -n "$uuid" ] || { err '无法获取 Tunnel UUID。'; return 1; }; cred="$CF_DIR/${uuid}.json"; [ -f "$cred" ] || { err "凭证文件不存在：$cred"; return 1; }
-    if [ -f "$DOMAIN_FILE" ]; then domain="$(cat "$DOMAIN_FILE")"; else printf '请输入绑定域名：'; read -r domain; printf '%s\n' "$domain" > "$DOMAIN_FILE"; fi
-    cat > "$CF_CONFIG" <<EOF
-url: http://127.0.0.1:$LOCAL_PORT
-tunnel: $uuid
-credentials-file: $cred
-EOF
-    cloudflared tunnel route dns "$name" "$domain" >/dev/null 2>&1 || true; tunnel_running && { pkill -f 'cloudflared.*tunnel.*run' || true; sleep 0.5; }; nohup cloudflared tunnel --config "$CF_CONFIG" --no-autoupdate run "$name" > "$CF_LOG" 2>&1 & sleep 1; tunnel_running && ok "Cloudflare Tunnel 已启动：https://$domain" || { err 'Tunnel 启动失败，请查看日志。'; return 1; }
-}
-stop_cloudflare(){ tunnel_running && pkill -f 'cloudflared.*tunnel.*run' || true; ok 'Cloudflare Tunnel 已停止。'; }
-tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
-auto_update_toolkit(){
-    [ -t 0 ] || return 0
-
-    local src remote_content remote_hash local_hash last_synced choice
-
-    src="${BASH_SOURCE[0]}"
-    [ -f "$src" ] || return 0
-
-    remote_content="$(toolkit_remote_code)"
-    [ -n "$remote_content" ] || return 0
-
-    remote_hash="$(toolkit_hash "$remote_content")"
-    local_hash="$(toolkit_hash "$(toolkit_local_code)")"
-
-    [ -n "$remote_hash" ] && [ "$remote_hash" = "$local_hash" ] && return 0
-
-    last_synced="$(cat "$TOOLKIT_SYNCED_HASH_FILE" 2>/dev/null || true)"
-
-    if [ -n "$last_synced" ] && [ "$local_hash" != "$last_synced" ]; then
-        warn '检测到本地 Toolkit 代码被手动修改，已跳过自动同步（避免覆盖你的改动）。'
-        return 0
+    has cloudflared || { err '未安装 cloudflared。'; return 1; }
+    mkdir -p "$CF_DIR"
+    if [ ! -f "$CF_CONFIG" ]; then
+        info '请执行 cloudflared tunnel login 完成授权后再继续。'
+        return 1
     fi
-
-    echo
-    warn '检测到 GitHub main 分支的 Toolkit 代码已更新。'
-    printf '是否立即同步最新代码？(Y/n)：'
-    read -r choice
-
-    case "$choice" in
-        n|N) return 0 ;;
-    esac
-
-    info '正在与 GitHub main 分支比对 Toolkit 代码...'
-    apply_toolkit_code "$remote_content" "$remote_hash"
-
-    echo
-    info '请重新运行 oplist 以加载最新 Toolkit。'
+    local name domain; printf 'Tunnel 名称：'; read -r name; [ -n "$name" ] || name="openlist"; printf '绑定域名：'; read -r domain; [ -n "$domain" ] || { err '域名不能为空。'; return 1; }
+    cloudflared tunnel route dns "$name" "$domain" || return 1
+    printf '%s\n' "$name" > "$TUNNEL_NAME_FILE"; printf '%s\n' "$domain" > "$DOMAIN_FILE"; ok 'Cloudflare Tunnel 配置完成。'
 }
+stop_cloudflare(){ pkill -f 'cloudflared.*tunnel.*run' 2>/dev/null || true; ok 'Cloudflare Tunnel 已停止。'; }
+tunnel_logs(){ [ -f "$CF_LOG" ] && tail -n 100 "$CF_LOG" || warn '暂无 Cloudflare Tunnel 日志。'; }
+backup_data(){ mkdirs; local stamp="$HOME/OpenList-Backups/openlist-$(date +%Y%m%d-%H%M%S).tar.gz"; tar -czf "$stamp" -C "$HOME_DIR" data 2>/dev/null && ok "备份完成：$stamp" || { err '备份失败。'; return 1; }; }
+restore_data(){
+    local file; printf '请输入备份文件路径：'; read -r file; [ -f "$file" ] || { err '备份文件不存在。'; return 1; }; mkdirs; tar -xzf "$file" -C "$HOME_DIR" || { err '还原失败。'; return 1; }; ok '数据还原完成。'
+}
+setup_nightly(){
+    if systemd && root; then
+        cat > /etc/systemd/system/openlist-toolkit-nightly.service <<EOF
+[Unit]
+Description=OpenList Toolkit nightly update
+[Service]
+Type=oneshot
+ExecStart=$SHORTCUT --update
+EOF
+        cat > /etc/systemd/system/openlist-toolkit-nightly.timer <<EOF
+[Unit]
+Description=OpenList Toolkit nightly timer
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload; systemctl enable --now openlist-toolkit-nightly.timer; ok '已开启每日自动更新。'
+    else
+        warn '当前环境不支持 systemd 定时任务。'
+    fi
+}
+remove_nightly(){ if systemd && root; then systemctl disable --now openlist-toolkit-nightly.timer >/dev/null 2>&1 || true; rm -f /etc/systemd/system/openlist-toolkit-nightly.service /etc/systemd/system/openlist-toolkit-nightly.timer; systemctl daemon-reload; ok '已关闭每日自动更新。'; else warn '当前环境不支持 systemd 定时任务。'; fi; }
 self_update(){
     local remote_content remote_hash local_hash src
-
     src="${BASH_SOURCE[0]}"
-
     remote_content="$(toolkit_remote_code)"
-    [ -n "$remote_content" ] || {
-        err '无法获取 GitHub main 最新 Toolkit。'
-        return 1
-    }
-
+    [ -n "$remote_content" ] || { err '无法获取 GitHub main 最新 Toolkit。'; return 1; }
     remote_hash="$(toolkit_hash "$remote_content")"
     local_hash="$(toolkit_hash "$(toolkit_local_code)")"
-
-    [ -n "$remote_hash" ] || {
-        err '无法计算远程 Toolkit 哈希。'
-        return 1
-    }
-
+    [ -n "$remote_hash" ] || { err '无法计算远程 Toolkit 哈希。'; return 1; }
     if [ "$remote_hash" = "$local_hash" ]; then
         info "当前 Toolkit：$(toolkit_build_id)"
         ok 'Toolkit 已是最新版本。'
         return 0
     fi
-
     info '正在与 GitHub main 分支比对 Toolkit 代码...'
-
     apply_toolkit_code "$remote_content" "$remote_hash" || return 1
-
     info '请重新运行 oplist 以加载最新 Toolkit。'
 }
-logs(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then journalctl -u openlist-toolkit.service -n 100 --no-pager; elif [ -f "$LOG_DIR/openlist.log" ]; then tail -n 100 "$LOG_DIR/openlist.log"; else warn '暂无 OpenList 日志。'; fi; }
-more(){
-    while true; do clear; line; center '更多功能'; line
-        echo '1. 修改 OpenList 密码'; echo '2. 编辑 OpenList 配置文件'; echo '3. 更新管理脚本'; echo '4. 备份/还原 OpenList 数据'; echo '5. 开启 OpenList 外网访问'; echo '6. 停止 OpenList 外网访问'; echo '7. 查看 Cloudflare Tunnel 日志'; echo '8. 开启每日自动更新'; echo '9. 关闭每日自动更新'; echo '10. 网络访问地址 / IP 检测'; echo '11. 生成 OpenList 访问二维码'; echo '12. 环境与依赖检查'; echo '13. 开启开机自启 + 异常自动恢复'; echo '14. 关闭开机自启 + 异常自动恢复'; echo '0. 返回主菜单'; line; printf '请输入选项 (0-14)：'; read -r c
-        case "$c" in 1) reset_password; pause_menu;; 2) edit_openlist_config; pause_menu;; 3) self_update; pause_menu;; 4) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;; 5) setup_cloudflare; pause_menu;; 6) stop_cloudflare; pause_menu;; 7) clear; tunnel_logs; pause_menu;; 8) setup_nightly; pause_menu;; 9) remove_nightly; pause_menu;; 10) clear; network_status; pause_menu;; 11) clear; show_qr; pause_menu;; 12) clear; check_environment; pause_menu;; 13) setup_boot; pause_menu;; 14) remove_boot; pause_menu;; 0) break;; *) warn '无效选项。'; sleep 0.5;; esac
-    done
+auto_update_toolkit(){
+    [ -t 0 ] || return 0
+    local src remote_content remote_hash local_hash last_synced choice
+    src="${BASH_SOURCE[0]}"
+    [ -f "$src" ] || return 0
+    remote_content="$(toolkit_remote_code)"
+    [ -n "$remote_content" ] || return 0
+    remote_hash="$(toolkit_hash "$remote_content")"
+    local_hash="$(toolkit_hash "$(toolkit_local_code)")"
+    [ -n "$remote_hash" ] && [ "$remote_hash" = "$local_hash" ] && return 0
+    last_synced="$(cat "$TOOLKIT_SYNCED_HASH_FILE" 2>/dev/null || true)"
+    if [ -n "$last_synced" ] && [ "$local_hash" != "$last_synced" ]; then
+        warn '检测到本地 Toolkit 代码被手动修改，已跳过自动同步（避免覆盖你的改动）。'
+        return 0
+    fi
+    echo
+    warn '检测到 GitHub main 分支的 Toolkit 代码已更新。'
+    printf '是否立即同步最新代码？(Y/n)：'
+    read -r choice
+    case "$choice" in n|N) return 0;; esac
+    info '正在与 GitHub main 分支比对 Toolkit 代码...'
+    apply_toolkit_code "$remote_content" "$remote_hash"
+    echo
+    info '请重新运行 oplist 以加载最新 Toolkit。'
 }
 menu(){
     while true; do clear; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(latest_version)"; line; center 'OpenList Toolkit'; center "Toolkit：$(toolkit_build_id)"; line
@@ -397,7 +333,31 @@ EOF
         case "$c" in 1) install_openlist; pause_menu;; 2) update_openlist; pause_menu;; 3) start_openlist; pause_menu;; 4) stop_openlist; pause_menu;; 5) restart_openlist; pause_menu;; 6) logs; pause_menu;; 7) backup_data; pause_menu;; 8) aria2_menu;; 9) more;; 0) exit 0;; *) warn '无效选项。'; sleep 0.5;; esac
     done
 }
+logs(){ if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then journalctl -u openlist-toolkit.service -n 100 --no-pager; elif [ -f "$LOG_DIR/openlist.log" ]; then tail -n 100 "$LOG_DIR/openlist.log"; else warn '暂无 OpenList 日志。'; fi; }
+more(){
+    while true; do clear; line; center '更多功能'; line
+        echo '1. 修改 OpenList 密码'; echo '2. 编辑 OpenList 配置文件'; echo '3. 更新管理脚本'; echo '4. 备份/还原 OpenList 数据'; echo '5. 开启 OpenList 外网访问'; echo '6. 停止 OpenList 外网访问'; echo '7. 查看 Cloudflare Tunnel 日志'; echo '8. 开启每日自动更新'; echo '9. 关闭每日自动更新'; echo '10. 网络访问地址 / IP 检测'; echo '11. 生成 OpenList 访问二维码'; echo '12. 环境与依赖检查'; echo '13. 开启开机自启 + 异常自动恢复'; echo '14. 关闭开机自启 + 异常自动恢复'; echo '0. 返回主菜单'; line; printf '请输入选项 (0-14)：'; read -r c
+        case "$c" in 1) reset_password; pause_menu;; 2) edit_openlist_config; pause_menu;; 3) self_update; pause_menu;; 4) clear; echo '1. 备份'; echo '2. 还原'; printf '请选择：'; read -r b; case "$b" in 1) backup_data;; 2) restore_data;; esac; pause_menu;; 5) setup_cloudflare; pause_menu;; 6) stop_cloudflare; pause_menu;; 7) clear; tunnel_logs; pause_menu;; 8) setup_nightly; pause_menu;; 9) remove_nightly; pause_menu;; 10) clear; network_status; pause_menu;; 11) clear; show_qr; pause_menu;; 12) clear; check_environment; pause_menu;; 13) setup_boot; pause_menu;; 14) remove_boot; pause_menu;; 0) break;; *) warn '无效选项。'; sleep 0.5;; esac
+    done
+}
 mkdirs
+check_version_bg
+if [ "${1:-}" = "--watchdog" ]; then
+    while [ -f "$WATCHDOG_ENABLED" ]; do
+        if [ ! -f "$MANUAL_STOP_FILE" ] && [ -x "$BINARY" ]; then
+            if ! running; then "$SHORTCUT" --start >/dev/null 2>&1 || true; fi
+        fi
+        sleep 30
+    done
+    exit 0
+fi
 case "${1:-}" in
-  --install) install_openlist;; --update) update_openlist;; --start) start_openlist;; --stop) stop_openlist;; --restart) restart_openlist;; --status) status;; --network) network_status;; --check) check_environment;; --qr) show_qr;; --setup-boot) setup_boot;; --remove-boot) remove_boot;; --watchdog) while [ -f "$WATCHDOG_ENABLED" ]; do [ -f "$MANUAL_STOP_FILE" ] || { running || start_openlist >/dev/null 2>&1 || true; }; sleep 30; done;; --logs) logs;; --aria2-start) start_aria2;; --aria2-stop) stop_aria2;; --backup) backup_data;; --self-update|--update-toolkit) self_update;; --setup-nightly-update) setup_nightly;; --remove-nightly-update) remove_nightly;; *) mkdir -p "$(dirname "$SHORTCUT")"; [ "${BASH_SOURCE[0]}" = "$SHORTCUT" ] || { cp "${BASH_SOURCE[0]}" "$SHORTCUT" 2>/dev/null || true; }; chmod +x "$SHORTCUT" 2>/dev/null || true; auto_update_toolkit; check_version_bg; menu;;
+    --start) start_openlist;;
+    --stop) stop_openlist;;
+    --restart) restart_openlist;;
+    --status) running && echo '状态：运行中' || echo '状态：未运行';;
+    --update) update_openlist;;
+    --self-update|--update-toolkit) self_update;;
+    --watchdog) ;;
+    *) auto_update_toolkit; menu;;
 esac
