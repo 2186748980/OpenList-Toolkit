@@ -19,6 +19,35 @@ OpenList Toolkit 把 OpenList、aria2、AriaNg、Cloudflare Tunnel、网络访�
 - 数据备份
 - 支持非交互命令模式
 - Linux 检测到 systemd 时可创建并启用 systemd 服务
+- 已安装 OpenList 时，选择“安装”会先确认，避免误操作重复安装
+- 重新安装时只处理 OpenList，不会默认停止 aria2 / AriaNg
+
+### 🔄 Toolkit 自更新（3.1）
+
+Toolkit 3.1 不再依赖 `TOOLKIT_VERSION` 或固定版本号判断 Toolkit 是否更新。
+
+现在直接对 GitHub `main` 分支的 `openlist.sh` 与本地 `openlist.sh` 计算 **SHA-256**：
+
+```text
+本地 openlist.sh ── SHA-256 ──┐
+                              ├─ 比较
+GitHub main/openlist.sh ──────┘
+```
+
+两者完全一致时，Toolkit 已是最新；不一致时会提示是否同步 GitHub `main` 的最新代码。
+
+支持：
+
+```bash
+./openlist.sh --self-update
+./openlist.sh --update-toolkit
+```
+
+菜单中的 Toolkit 自更新同样使用这套机制。
+
+Toolkit 会记录最近一次同步的远程 SHA-256。如果发现本地代码在同步后被手动修改，自动同步会跳过，以避免直接覆盖用户自己的改动。
+
+更新完成后需要重新运行 `oplist` / `./openlist.sh`，使新代码重新加载。
 
 ### 🌐 网络访问
 
@@ -43,17 +72,12 @@ Toolkit 可以直接在终端生成 OpenList 局域网访问二维码。
 
 优先使用 `qrencode`；如果 Termux 软件源没有 `qrencode`，则自动使用 Python `qrcode` 模块生成终端二维码。
 
-这样在手机终端中可以直接把二维码交给另一台设备扫描访问 OpenList，而不需要手动输入 IP 地址。
-
 ### ⚡ aria2
 
-Toolkit 内置 aria2 管理，集中处理下载服务：
+Toolkit 内置 aria2 管理：
 
-- 启动 aria2
-- 停止 aria2
-- 重启 aria2
-- 查看 aria2 状态
-- 查看 aria2 日志
+- 启动 / 停止 / 重启 aria2
+- 查看状态与日志
 - 编辑 aria2 配置
 - 更新 BT Tracker
 - RPC 地址：`http://127.0.0.1:6800`
@@ -71,25 +95,15 @@ Toolkit 内置 aria2 管理，集中处理下载服务：
 
 ### 🖥️ AriaNg Web 管理
 
-Toolkit 可以在 aria2 管理中安装、更新和启动 AriaNg，为 aria2 提供浏览器 WebUI。
+Toolkit 可以安装、更新和启动 AriaNg，为 aria2 提供浏览器 WebUI。
 
-AriaNg 默认由 Toolkit 在本地端口运行：
+默认地址：
 
 ```text
 http://127.0.0.1:6880
 ```
 
-功能包括：
-
-- 安装 / 更新 AriaNg
-- 启动 / 停止 AriaNg
-- 查看 AriaNg 日志
-- 通过浏览器管理 aria2 下载任务
-- 与本机 `6800` RPC 服务配合使用
-
-AriaNg 更新逻辑会尝试检测 `mayswind/AriaNg` 的最新 Release，并生成对应的 `AriaNg-版本-AllInOne.zip` 下载地址；如果无法检测最新版本，则保留稳定版本作为兜底。
-
-**注意：** AriaNg 是 WebUI，本身不是 aria2 服务。需要先运行 aria2，AriaNg 才能连接 RPC。
+AriaNg 是 WebUI，不是 aria2 服务；需要先运行 aria2，AriaNg 才能连接 RPC。
 
 ### ☁️ Cloudflare Tunnel
 
@@ -106,35 +120,30 @@ Toolkit 支持 Cloudflare Tunnel，用于在没有端口转发的情况下为 Op
 └── domain
 ```
 
-通过 Toolkit 配置 Tunnel 时，可以完成登录授权、创建 Tunnel、绑定域名以及启动 / 停止 Tunnel。
+### 🔗 OpenList / aria2 / AriaNg 停止联动
 
-例如可以将：
+选择主菜单的：
 
 ```text
-http://127.0.0.1:5244
+4. 停止 OpenList
 ```
 
-映射到你自己的 Cloudflare 域名。
+OpenList 停止后会询问：
 
-### 🔄 自动版本检测
+```text
+是否同步停止 aria2 和 AriaNg？(y/n)：
+```
 
-Toolkit 会检测 OpenList 上游最新版本，并使用本地缓存减少重复请求。
+- `y` / `Y`：同步停止 aria2 和 AriaNg
+- `n` / `N`：保留 aria2 和 AriaNg 继续运行
+- 直接按 Enter：默认保留 aria2 和 AriaNg 运行
+- 其他输入：同样保留 aria2 和 AriaNg 运行
 
-版本检测缓存默认有效约 60 分钟，因此启动菜单时不会每次都重复请求 GitHub API。
+这样可以避免仅仅停止 OpenList 时误把下载服务一起停止。
 
 ### 🔁 Termux 开机自启 + 异常恢复
 
-在 Android / Termux 环境中，Toolkit 可以创建 Termux:Boot 启动脚本：
-
-1. 系统启动后等待一段时间
-2. 自动启动 OpenList
-3. 启动 watchdog
-4. watchdog 周期性检查 OpenList
-5. 如果 OpenList 异常退出，则尝试自动恢复
-
-需要安装 **Termux:Boot**，并允许 Termux 后台运行及系统自启动。
-
-关闭自启后，Toolkit 会同时移除 watchdog 和相关状态文件。
+在 Android / Termux 环境中，Toolkit 可以创建 Termux:Boot 启动脚本，并通过 watchdog 检查 OpenList 是否异常退出。
 
 ## 🚀 快速开始
 
@@ -181,7 +190,7 @@ Toolkit 会根据 `uname -m` 自动识别架构，目前支持：
 - `arm-6`
 - `386` / i386
 
-Android / Termux 会自动使用 OpenList 的 Android 对应安装包。
+Android / Termux 会自动使用 OpenList 对应安装包。
 
 ## 🖥️ Linux
 
@@ -193,8 +202,6 @@ Linux 环境同样使用统一脚本。
 /etc/systemd/system/openlist-toolkit.service
 ```
 
-服务具备失败自动重启能力，并设置为随系统启动。
-
 没有 systemd 时，则使用 PID 文件管理 OpenList。
 
 ## 🛠️ 主菜单
@@ -204,27 +211,30 @@ Linux 环境同样使用统一脚本。
 ```text
 =======================================================
                    OpenList Toolkit
+                    Toolkit：xxxxxxxx
 =======================================================
 系统：android   架构：arm64
 OpenList：v4.x.x → 最新 v4.x.x
-状态：运行中
+OpenList 状态：运行中 / 未运行
+aria2 状态：运行中 / 未运行
+AriaNg 状态：运行中 / 未运行
+Cloudflare Tunnel 状态：运行中 / 未运行
 本机访问：http://127.0.0.1:5244
-热点/Wi-Fi访问：http://192.168.x.x:5244
 =======================================================
 1. 安装 OpenList
 2. 更新 OpenList
 3. 启动 OpenList
 4. 停止 OpenList
 5. 重启 OpenList
-6. 查看状态
-7. 查看 OpenList 日志
-8. 备份数据
+6. 查看 OpenList 日志
+7. 备份数据
+8. aria2 管理
 9. 更多功能
 0. 退出
 =======================================================
 ```
 
-主界面会根据当前运行情况显示 OpenList 状态和网络访问地址。
+Toolkit 标识使用当前 `openlist.sh` SHA-256 的前 7 位生成，不再使用固定 Toolkit 版本号。
 
 ### 更多功能
 
@@ -254,15 +264,11 @@ Web 管理：AriaNg 运行中 / 未运行
 =======================================================
 1. 启动 aria2
 2. 停止 aria2
-3. 重启 aria2
-4. 查看 aria2 状态
-5. 查看 aria2 日志
-6. 编辑 aria2 配置文件
-7. 更新 aria2 BT Tracker
-8. 安装/更新并启动 AriaNg
-9. 停止 AriaNg
-10. 查看 AriaNg 日志
-0. 返回主菜单
+3. 启动 AriaNg
+4. 停止 AriaNg
+5. 同时启动
+6. 同时停止
+0. 返回
 =======================================================
 ```
 
@@ -290,41 +296,15 @@ AriaNg 默认监听：
 127.0.0.1:6880
 ```
 
-安装 / 更新入口为：
-
-```text
-8. 安装/更新并启动 AriaNg
-```
-
 正常安装后，在浏览器访问：
 
 ```text
 http://127.0.0.1:6880
 ```
 
-如果需要从局域网其他设备访问，需要将 `6880` 对应的地址改为运行 Toolkit 设备的局域网 IP，并确保网络环境允许访问该端口。
-
-## ☁️ Cloudflare Tunnel 使用流程
-
-Cloudflare Tunnel 需要先完成 Cloudflare 登录授权。
-
-典型流程：
-
-```text
-1. 登录 Cloudflare
-2. 选择要授权的 Zone
-3. 创建 Tunnel
-4. 输入 Tunnel 名称
-5. 输入绑定域名
-6. Toolkit 启动 cloudflared
-7. 使用绑定域名访问 OpenList
-```
-
-Tunnel 凭据由 cloudflared 保存到用户目录，**不要上传到 GitHub**。
-
 ## 📋 命令行模式
 
-Toolkit 支持部分常用非交互操作：
+Toolkit 支持常用非交互操作：
 
 ```bash
 ./openlist.sh --install
@@ -335,6 +315,8 @@ Toolkit 支持部分常用非交互操作：
 ./openlist.sh --status
 ./openlist.sh --logs
 ./openlist.sh --backup
+./openlist.sh --self-update
+./openlist.sh --update-toolkit
 ```
 
 如果安装过程中生成了快捷命令，也可以使用：
@@ -357,6 +339,7 @@ oplist --status
 ├── logs/
 ├── version
 ├── latest-version
+├── .toolkit-synced-hash
 └── openlist.pid
 ```
 
@@ -404,15 +387,12 @@ Toolkit 使用独立目录保存 OpenList 备份：
 ~/OpenList-Backups/
 ```
 
-备份功能用于保存 OpenList 数据，避免更新或调整配置时丢失重要内容。
-
 ## 🔐 安全建议
 
 - 不要把 `~/.aria2_secret` 提交到 GitHub。
 - 不要把 `~/.cloudflared/cert.pem` 或 Tunnel credentials JSON 上传到仓库。
 - Cloudflare Tunnel 对外开放后，请使用强密码保护 OpenList。
 - aria2 RPC 不建议直接暴露到公网。
-- 局域网访问也应建立在可信网络环境中。
 - GitHub Token 如有配置，应保存在本机的 `~/.github_token`，不要写入脚本。
 
 ## 🧩 依赖检查
@@ -433,10 +413,11 @@ Toolkit 会检查基础能力，包括：
 ## 📝 当前版本
 
 ```text
-OpenList Toolkit：v0.6.1
+OpenList Toolkit：3.1
+更新机制：GitHub main/openlist.sh SHA-256
 ```
 
-脚本中的 Toolkit 版本号与 README 保持同步。
+Toolkit 不再使用固定的 `TOOLKIT_VERSION` 判断自身是否更新。
 
 ## 📄 License
 
