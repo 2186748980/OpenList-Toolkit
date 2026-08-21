@@ -58,3 +58,4 @@ latest_version(){ if [ -s "$TOOLKIT_GIT_CACHE" ]; then local v; v="$(cat "$TOOLK
           git add openlist.sh .github/workflows/toolkit-git-sync-migration.yml
           git diff --cached --quiet || git commit -m "feat: detect toolkit updates by git commit [toolkit-git-sync]"
           git push origin HEAD:main
+# trigger migration
