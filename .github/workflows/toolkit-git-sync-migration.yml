@@ -28,6 +28,8 @@ jobs:
           s = p.read_text()
 
           if 'sha256_of(){' in s:
+              s = s.replace('center "v$TOOLKIT_VERSION"', 'center "Toolkit：$(toolkit_build_id)"')
+              p.write_text(s)
               raise SystemExit(0)
 
           s = s.replace('TOOLKIT_VERSION="0.6.1"\n', '', 1)
