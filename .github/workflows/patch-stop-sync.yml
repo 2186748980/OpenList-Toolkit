@@ -1,0 +1,69 @@
+name: Patch stop service sync
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'fix: sync dependent services stop') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch stop_openlist
+        shell: bash
+        run: |
+          set -e
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('openlist.sh')
+          s = p.read_text()
+          pattern = r'stop_openlist\(\)\{.*?\n\}\nrestart_openlist\(\)\{'
+          m = re.search(pattern, s, re.S)
+          if not m:
+              raise SystemExit('stop_openlist not found')
+          new = r'''stop_openlist(){
+              : > "$MANUAL_STOP_FILE"
+              if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then
+                  systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true
+              elif [ -f "$PID_FILE" ]; then
+                  local p="$(cat "$PID_FILE" 2>/dev/null || true)"
+                  [ -z "$p" ] || kill "$p" 2>/dev/null || true
+                  rm -f "$PID_FILE"
+              fi
+              stop_ariang
+              stop_aria2
+              sleep 0.2
+              local failed=0
+              if running; then
+                  err 'OpenList 停止失败，仍在运行。'
+                  failed=1
+              else
+                  ok 'OpenList 已停止。'
+              fi
+              if ariang_running; then
+                  err 'AriaNg 停止失败，仍在运行。'
+                  failed=1
+              else
+                  ok 'AriaNg 已同步停止。'
+              fi
+              if aria2_running; then
+                  err 'aria2 停止失败，仍在运行。'
+                  failed=1
+              else
+                  ok 'aria2 已同步停止。'
+              fi
+              [ "$failed" -eq 0 ]
+          }
+          restart_openlist(){'''
+          p.write_text(s[:m.start()] + new + s[m.end():])
+          PY
+          bash -n openlist.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add openlist.sh
+          git commit -m 'fix: sync dependent services stop'
+          git push origin HEAD:main
