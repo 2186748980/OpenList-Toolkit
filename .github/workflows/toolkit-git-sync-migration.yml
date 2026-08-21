@@ -3,13 +3,14 @@ name: Toolkit Git Sync Migration
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   migrate:
-    if: ${{ !contains(github.event.head_commit.message, '[toolkit-git-sync]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[toolkit-git-sync]') || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,106 +26,78 @@ jobs:
           p = Path('openlist.sh')
           s = p.read_text()
 
-          if 'TOOLKIT_GIT_CACHE=' in s and 'git -C "$SCRIPT_DIR" fetch --quiet origin main' in s:
-              print('Migration already present; nothing to do.')
-              raise SystemExit(0)
+          if 'TOOLKIT_GIT_CACHE=' not in s:
+              s = s.replace('REPO="2186748980/OpenList-Toolkit"\n', 'REPO="2186748980/OpenList-Toolkit"\nSCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\nTOOLKIT_GIT_CACHE="$HOME/.openlist/latest-toolkit-commit"\n', 1)
 
-          s = s.replace(
-              'REPO="2186748980/OpenList-Toolkit"\n',
-              'REPO="2186748980/OpenList-Toolkit"\n'
-              'SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\n'
-              'TOOLKIT_GIT_CACHE="$HOME/.openlist/latest-toolkit-commit"\n'
-              'TOOLKIT_GIT_CHECKING="$HOME/.openlist/.toolkit-git-checking"\n',
-              1,
-          )
-          s = s.replace('TOOLKIT_VERSION="0.6.1"', 'TOOLKIT_VERSION="git-sync"', 1)
+          s = re.sub(r'^TOOLKIT_VERSION="[^"]*"$', 'TOOLKIT_VERSION="git-sync"', s, count=1, flags=re.M)
 
-          s, n = re.subn(
-              r'(?ms)^toolkit_version\(\)\{.*?^\}',
-              '''toolkit_version(){
-              if [ -d "$SCRIPT_DIR/.git" ] && has git; then
-                  git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "未知"
-              else
-                  echo "未连接 Git"
-              fi
-          }''',
-              s,
-              count=1,
-          )
+          s, n = re.subn(r'(?ms)^toolkit_version\(\)\{.*?^\}\ncheck_version_bg\(\)\{.*?^\}\nlatest_version\(\)\{.*?^\}', '''toolkit_version(){
+    if [ -d "$SCRIPT_DIR/.git" ] && has git; then
+        git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "未知"
+    else
+        echo "未连接 Git"
+    fi
+}
+check_version_bg(){
+    mkdirs
+    [ -d "$SCRIPT_DIR/.git" ] && has git || return 0
+    ( remote="$(git -C "$SCRIPT_DIR" ls-remote origin refs/heads/main 2>/dev/null | awk '{print $1}' | head -n1)"; [ -n "$remote" ] && printf '%s\n' "$remote" > "$TOOLKIT_GIT_CACHE" ) >/dev/null 2>&1 &
+}
+latest_version(){
+    if [ -s "$TOOLKIT_GIT_CACHE" ]; then
+        local v; v="$(cat "$TOOLKIT_GIT_CACHE")"; printf 'git:%s\n' "${v:0:7}"
+    else
+        echo "检测中"
+    fi
+}''', s, count=1)
           if n != 1:
-              raise SystemExit('Failed to replace toolkit_version()')
+              raise SystemExit('Failed to replace toolkit version/check functions')
 
-          s, n = re.subn(
-              r'(?ms)^check_version_bg\(\)\{.*?^\}\nlatest_version\(\)\{.*?^\}',
-              '''check_version_bg(){
-              mkdirs
-              [ -d "$SCRIPT_DIR/.git" ] && has git || return 0
-              [ -f "$TOOLKIT_GIT_CHECKING" ] && return 0
-              : > "$TOOLKIT_GIT_CHECKING"
-              (
-                  remote="$(git -C "$SCRIPT_DIR" ls-remote origin refs/heads/main 2>/dev/null | awk '{print $1}' | head -n1)"
-                  [ -n "$remote" ] && printf '%s\\n' "$remote" > "$TOOLKIT_GIT_CACHE"
-                  rm -f "$TOOLKIT_GIT_CHECKING"
-              ) >/dev/null 2>&1 &
-          }
-          latest_version(){
-              if [ -s "$TOOLKIT_GIT_CACHE" ]; then
-                  local v; v="$(cat "$TOOLKIT_GIT_CACHE")"; printf 'git:%s\\n' "${v:0:7}"
-              else
-                  echo "检测中"
-              fi
-          }''',
-              s,
-              count=1,
-          )
+          # Replace the Toolkit self-update function only. Keep OpenList updater unchanged.
+          pat = r'(?ms)^self_update\(\)\{.*?^\}\n'
+          replacement = '''self_update(){
+    [ -d "$SCRIPT_DIR/.git" ] || { err "当前 Toolkit 目录不是 Git 仓库，无法同步云端代码。"; return 1; }
+    has git || { err "未安装 git，无法检测云端代码变动。"; return 1; }
+    info "正在检测 GitHub 云端代码变动..."
+    git -C "$SCRIPT_DIR" fetch --quiet origin main || { err "获取云端代码失败，请检查网络。"; return 1; }
+    local cur remote
+    cur="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+    remote="$(git -C "$SCRIPT_DIR" rev-parse origin/main 2>/dev/null || true)"
+    [ -n "$remote" ] || { err "无法读取云端 main 分支。"; return 1; }
+    if [ "$cur" = "$remote" ]; then
+        ok "Toolkit 已是云端最新代码：${remote:0:7}"
+        return 0
+    fi
+    info "发现云端代码变动：${cur:0:7} → ${remote:0:7}"
+    git -C "$SCRIPT_DIR" reset --hard origin/main || { err "同步云端代码失败。"; return 1; }
+    printf '%s\n' "$remote" > "$TOOLKIT_GIT_CACHE"
+    ok "Toolkit 已同步到云端最新代码：${remote:0:7}"
+    info "请重新运行脚本以使用最新代码。"
+}
+'''
+          s, n = re.subn(pat, replacement, s, count=1)
           if n != 1:
-              raise SystemExit('Failed to replace check_version_bg()/latest_version()')
+              raise SystemExit('Failed to replace self_update()')
 
-          lines = s.splitlines(True)
-          start = end = None
-          fn = None
-          for i, line in enumerate(lines):
-              m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\{\s*$', line)
-              if not m:
-                  continue
-              j = i + 1
-              while j < len(lines) and not re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\{\s*$', lines[j]):
-                  j += 1
-              body = ''.join(lines[i:j])
-              if 'toolkit_version' in body and m.group(1) != 'toolkit_version':
-                  start, end, fn = i, j, m.group(1)
-                  break
+          # Remove the obsolete raw-version comparison block inside auto_update_toolkit.
+          s, n = re.subn(r'(?ms)^auto_update_toolkit\(\)\{.*?^\}\n', '''auto_update_toolkit(){
+    [ -d "$SCRIPT_DIR/.git" ] && has git || return 0
+    local cur remote
+    git -C "$SCRIPT_DIR" fetch --quiet origin main >/dev/null 2>&1 || return 0
+    cur="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+    remote="$(git -C "$SCRIPT_DIR" rev-parse origin/main 2>/dev/null || true)"
+    [ -n "$remote" ] && [ "$cur" != "$remote" ] || return 0
+    warn "发现 Toolkit 云端代码更新：${cur:0:7} → ${remote:0:7}"
+    git -C "$SCRIPT_DIR" reset --hard origin/main >/dev/null 2>&1 || { err "Toolkit 云端代码同步失败。"; return 1; }
+    ok "Toolkit 已同步到云端最新代码：${remote:0:7}"
+    info "正在使用最新代码重新启动..."
+    exec "$SCRIPT_DIR/openlist.sh" "$@"
+}
+''', s, count=1)
+          if n != 1:
+              print('auto_update_toolkit() not found; leaving it unchanged')
 
-          if start is None:
-              raise SystemExit('Could not locate the Toolkit self-update function')
-
-          new = f'''{fn}(){{
-              if [ ! -d "$SCRIPT_DIR/.git" ]; then
-                  err "当前 Toolkit 目录不是 Git 仓库，无法同步云端代码。"
-                  return 1
-              fi
-              has git || {{ err "未安装 git，无法检测云端代码变动。"; return 1; }}
-              info "正在检测 GitHub 云端代码变动..."
-              git -C "$SCRIPT_DIR" fetch --quiet origin main || {{ err "获取云端代码失败，请检查网络。"; return 1; }}
-              local cur remote
-              cur="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
-              remote="$(git -C "$SCRIPT_DIR" rev-parse origin/main 2>/dev/null || true)"
-              [ -n "$remote" ] || {{ err "无法读取云端 main 分支。"; return 1; }}
-              if [ "$cur" = "$remote" ]; then
-                  ok "Toolkit 已是云端最新代码：${{remote:0:7}}"
-                  return 0
-              fi
-              info "发现云端代码变动：${{cur:0:7}} → ${{remote:0:7}}"
-              git -C "$SCRIPT_DIR" reset --hard origin/main || {{ err "同步云端代码失败。"; return 1; }}
-              printf '%s\\n' "$remote" > "$TOOLKIT_GIT_CACHE"
-              ok "Toolkit 已同步到云端最新代码：${{remote:0:7}}"
-              info "请重新运行脚本以使用最新代码。"
-              return 0
-          }}
-          '''
-          s = ''.join(lines[:start]) + new + ''.join(lines[end:])
           p.write_text(s)
-          print('Replaced self-update function:', fn)
 
       - name: Validate shell syntax
         run: bash -n openlist.sh
@@ -133,6 +106,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- openlist.sh
-          git diff --cached --quiet || git commit -m "feat: sync toolkit updates by git commit [toolkit-git-sync]"
+          git add -- openlist.sh .github/workflows/toolkit-git-sync-migration.yml
+          git diff --cached --quiet || git commit -m "feat: detect toolkit updates by git commit [toolkit-git-sync]"
           git push origin HEAD:main
