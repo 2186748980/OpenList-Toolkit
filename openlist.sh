@@ -386,7 +386,7 @@ more(){
     done
 }
 menu(){
-    while true; do clear; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(latest_version)"; line; center 'OpenList Toolkit'; center "v$TOOLKIT_VERSION"; line
+    while true; do clear; local cur latest; cur="$(cat "$VERSION_FILE" 2>/dev/null || true)"; latest="$(latest_version)"; line; center 'OpenList Toolkit'; center "Toolkit：$(toolkit_build_id)"; line
         printf '%b系统%b：%s   %b架构%b：%s\n' "$CY" "$R" "$(os_name)" "$CY" "$R" "$(arch)"; if [ -n "$cur" ]; then echo -e "${CY}OpenList${R}：$cur → 最新 ${latest:-未知}"; else echo -e "${CY}OpenList${R}：${YE}未安装${R} → 最新 ${latest:-未知}"; fi
         running && echo -e "${CY}OpenList 状态${R}：${GR}运行中${R}" || echo -e "${CY}OpenList 状态${R}：${RE}未运行${R}"; aria2_running && echo -e "${CY}aria2 状态${R}：${GR}运行中${R}" || echo -e "${CY}aria2 状态${R}：${RE}未运行${R}"; ariang_running && echo -e "${CY}AriaNg 状态${R}：${GR}运行中${R}" || echo -e "${CY}AriaNg 状态${R}：${RE}未运行${R}"; tunnel_running && echo -e "${CY}Cloudflare Tunnel 状态${R}：${GR}运行中${R}" || echo -e "${CY}Cloudflare Tunnel 状态${R}：${RE}未运行${R}"
         if running; then echo "本机访问：http://127.0.0.1:$LOCAL_PORT"; while IFS="|" read -r iface ip; do [ -n "$ip" ] || continue; case "$iface" in ap*) echo "热点访问：http://$ip:$LOCAL_PORT";; wlan*) echo "Wi-Fi访问：http://$ip:$LOCAL_PORT";; *) echo "局域网访问：http://$ip:$LOCAL_PORT";; esac; done <<EOF
