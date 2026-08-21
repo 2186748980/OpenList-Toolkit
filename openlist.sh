@@ -206,7 +206,31 @@ start_openlist(){
         return 1
     fi
 }
-stop_openlist(){ : > "$MANUAL_STOP_FILE"; if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true; ok 'OpenList 已停止。'; return; fi; if [ -f "$PID_FILE" ]; then local p="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -z "$p" ] || kill "$p" 2>/dev/null || true; rm -f "$PID_FILE"; fi; ok 'OpenList 已停止。'; }
+stop_openlist(){
+    : > "$MANUAL_STOP_FILE"
+    if systemd && [ -f /etc/systemd/system/openlist-toolkit.service ]; then
+        systemctl stop openlist-toolkit.service >/dev/null 2>&1 || true
+    elif [ -f "$PID_FILE" ]; then
+        local p="$(cat "$PID_FILE" 2>/dev/null || true)"
+        [ -z "$p" ] || kill "$p" 2>/dev/null || true
+        rm -f "$PID_FILE"
+    fi
+    ok 'OpenList 已停止。'
+    printf '是否同步停止 aria2 和 AriaNg？(y/n)：'
+    read -r choice
+    case "$choice" in
+        y|Y)
+            stop_ariang
+            stop_aria2
+            ;;
+        n|N)
+            info '已保留 aria2 和 AriaNg 运行。'
+            ;;
+        *)
+            info '输入无效，已保留 aria2 和 AriaNg 运行。'
+            ;;
+    esac
+}
 restart_openlist(){ stop_openlist; start_openlist; }
 setup_aria2(){
     if ! has aria2c; then if is_termux && has pkg; then pkg install -y aria2 || return 1; else err '未检测到 aria2c，请先安装 aria2。'; return 1; fi; fi
