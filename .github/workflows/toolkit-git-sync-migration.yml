@@ -1,4 +1,4 @@
-name: Toolkit Git Sync Migration
+name: Toolkit SHA-256 Migration
 
 on:
   push:
@@ -10,52 +10,162 @@ permissions:
 
 jobs:
   migrate:
-    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[toolkit-git-sync]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[toolkit-sha256]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Convert Toolkit updater from version check to Git sync
+
+      - name: Convert Toolkit updater to SHA-256 sync
         shell: python
         run: |
           from pathlib import Path
           import re
-          p=Path('openlist.sh'); s=p.read_text()
-          if 'SCRIPT_DIR=' not in s:
-              s=s.replace('REPO="2186748980/OpenList-Toolkit"\n','REPO="2186748980/OpenList-Toolkit"\nSCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\nTOOLKIT_GIT_CACHE="$HOME/.openlist/latest-toolkit-commit"\nTOOLKIT_GIT_CHECKING="$HOME/.openlist/.toolkit-git-checking"\n',1)
-          s=re.sub(r'^TOOLKIT_VERSION="[^"]*"$','TOOLKIT_VERSION="git-sync"',s,count=1,flags=re.M)
-          s,n=re.subn(r'(?ms)^toolkit_version\(\)\{.*?^\}\ncheck_version_bg\(\)\{.*?^\}\nlatest_version\(\)\{.*?^\}', '''toolkit_version(){
-    if [ -d "$SCRIPT_DIR/.git" ] && has git; then git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "未知"; else echo "未连接 Git"; fi
-}
-check_version_bg(){
-    mkdirs; [ -d "$SCRIPT_DIR/.git" ] && has git || return 0; [ -f "$TOOLKIT_GIT_CHECKING" ] && return 0; : > "$TOOLKIT_GIT_CHECKING"
-    ( remote="$(git -C "$SCRIPT_DIR" ls-remote origin refs/heads/main 2>/dev/null | awk '{print $1}' | head -n1)"; [ -n "$remote" ] && printf '%s\n' "$remote" > "$TOOLKIT_GIT_CACHE"; rm -f "$TOOLKIT_GIT_CHECKING" ) >/dev/null 2>&1 &
-}
-latest_version(){ if [ -s "$TOOLKIT_GIT_CACHE" ]; then local v; v="$(cat "$TOOLKIT_GIT_CACHE")"; printf 'git:%s\n' "${v:0:7}"; else echo "检测中"; fi; }''',s,count=1)
-          if n!=1: raise SystemExit('version functions not found')
-          repl='''self_update(){
-    [ -d "$SCRIPT_DIR/.git" ] || { err "当前 Toolkit 目录不是 Git 仓库，无法同步云端代码。"; return 1; }
-    has git || { err "未安装 git，无法检测云端代码变动。"; return 1; }
-    info "正在检测 GitHub 云端代码变动..."
-    git -C "$SCRIPT_DIR" fetch --quiet origin main || { err "获取云端代码失败，请检查网络。"; return 1; }
-    local cur remote; cur="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"; remote="$(git -C "$SCRIPT_DIR" rev-parse origin/main)"
-    if [ "$cur" = "$remote" ]; then ok "Toolkit 已是云端最新代码：${remote:0:7}"; return 0; fi
-    info "发现云端代码变动：${cur:0:7} → ${remote:0:7}"; git -C "$SCRIPT_DIR" reset --hard origin/main || { err "同步云端代码失败。"; return 1; }
-    ok "Toolkit 已同步到云端最新代码：${remote:0:7}"; info "请重新运行脚本以使用最新代码。"
-}
-'''
-          s,n=re.subn(r'(?ms)^self_update\(\)\{.*?^\}\n',repl,s,count=1)
-          if n!=1: raise SystemExit('self_update not found')
+
+          p = Path('openlist.sh')
+          s = p.read_text()
+
+          if 'sha256_of(){' in s:
+              raise SystemExit(0)
+
+          s = s.replace('TOOLKIT_VERSION="0.6.1"\n', '', 1)
+          s = s.replace('HOME_DIR="${OPENLIST_HOME:-$HOME/.openlist}"\n', 'HOME_DIR="${OPENLIST_HOME:-$HOME/.openlist}"\nTOOLKIT_SYNCED_HASH_FILE="$HOME_DIR/.toolkit-synced-hash"\n', 1)
+
+          new_helpers = r'''sha256_of(){ if has sha256sum; then sha256sum | awk '{print $1}'; elif has shasum; then shasum -a 256 | awk '{print $1}'; elif has openssl; then openssl dgst -sha256 | awk '{print $NF}'; else echo ''; fi; }
+          toolkit_remote_code(){ api_get "https://raw.githubusercontent.com/$REPO/main/openlist.sh"; }
+          toolkit_local_code(){ cat "${BASH_SOURCE[0]}" 2>/dev/null; }
+          toolkit_hash(){ printf '%s' "$1" | sha256_of; }
+          toolkit_build_id(){ local h; h="$(toolkit_hash "$(toolkit_local_code)")"; [ -n "$h" ] && printf '%s\n' "${h:0:7}" || echo 'dev'; }
+          apply_toolkit_code(){
+              local remote_content="$1" remote_hash="$2" tmp src
+              src="${BASH_SOURCE[0]}"
+              tmp="$(mktemp)"
+
+              printf '%s\n' "$remote_content" > "$tmp"
+
+              head -n1 "$tmp" | grep -q '^#!' || {
+                  err '云端代码 校验失败，已取消同步。'
+                  rm -f "$tmp"
+                  return 1
+              }
+
+              [ "$(wc -c < "$tmp")" -gt 500 ] || {
+                  err '云端代码 内容异常，已取消同步。'
+                  rm -f "$tmp"
+                  return 1
+              }
+
+              chmod +x "$tmp"
+              cp "$tmp" "$src"
+
+              mkdir -p "$(dirname "$SHORTCUT")"
+              cp "$tmp" "$SHORTCUT" 2>/dev/null || true
+              chmod +x "$SHORTCUT" 2>/dev/null || true
+
+              rm -f "$tmp"
+
+              printf '%s\n' "$remote_hash" > "$TOOLKIT_SYNCED_HASH_FILE"
+
+              ok 'Toolkit 代码已同步为 GitHub main 最新版本。'
+          }
+          '''
+
+          s, n = re.subn(r'(?ms)^toolkit_version\(\)\{.*?^\}\n', new_helpers, s, count=1)
+          if n != 1:
+              raise SystemExit('toolkit_version not found')
+
+          auto_update = r'''auto_update_toolkit(){
+              [ -t 0 ] || return 0
+
+              local src remote_content remote_hash local_hash last_synced choice
+
+              src="${BASH_SOURCE[0]}"
+              [ -f "$src" ] || return 0
+
+              remote_content="$(toolkit_remote_code)"
+              [ -n "$remote_content" ] || return 0
+
+              remote_hash="$(toolkit_hash "$remote_content")"
+              local_hash="$(toolkit_hash "$(toolkit_local_code)")"
+
+              [ -n "$remote_hash" ] && [ "$remote_hash" = "$local_hash" ] && return 0
+
+              last_synced="$(cat "$TOOLKIT_SYNCED_HASH_FILE" 2>/dev/null || true)"
+
+              if [ -n "$last_synced" ] && [ "$local_hash" != "$last_synced" ]; then
+                  warn '检测到本地 Toolkit 代码被手动修改，已跳过自动同步（避免覆盖你的改动）。'
+                  return 0
+              fi
+
+              echo
+              warn '检测到 GitHub main 分支的 Toolkit 代码已更新。'
+              printf '是否立即同步最新代码？(Y/n)：'
+              read -r choice
+
+              case "$choice" in
+                  n|N) return 0 ;;
+              esac
+
+              info '正在与 GitHub main 分支比对 Toolkit 代码...'
+              apply_toolkit_code "$remote_content" "$remote_hash"
+
+              echo
+              info '请重新运行 oplist 以加载最新 Toolkit。'
+          }
+          '''
+
+          s, n = re.subn(r'(?ms)^auto_update_toolkit\(\)\{.*?^\}\n', auto_update, s, count=1)
+          if n != 1:
+              raise SystemExit('auto_update_toolkit not found')
+
+          self_update = r'''self_update(){
+              local remote_content remote_hash local_hash src
+
+              src="${BASH_SOURCE[0]}"
+
+              remote_content="$(toolkit_remote_code)"
+              [ -n "$remote_content" ] || {
+                  err '无法获取 GitHub main 最新 Toolkit。'
+                  return 1
+              }
+
+              remote_hash="$(toolkit_hash "$remote_content")"
+              local_hash="$(toolkit_hash "$(toolkit_local_code)")"
+
+              [ -n "$remote_hash" ] || {
+                  err '无法计算远程 Toolkit 哈希。'
+                  return 1
+              }
+
+              if [ "$remote_hash" = "$local_hash" ]; then
+                  info "当前 Toolkit：$(toolkit_build_id)"
+                  ok 'Toolkit 已是最新版本。'
+                  return 0
+              fi
+
+              info '正在与 GitHub main 分支比对 Toolkit 代码...'
+
+              apply_toolkit_code "$remote_content" "$remote_hash" || return 1
+
+              info '请重新运行 oplist 以加载最新 Toolkit。'
+          }
+          '''
+
+          s, n = re.subn(r'(?ms)^self_update\(\)\{.*?^\}\n', self_update, s, count=1)
+          if n != 1:
+              raise SystemExit('self_update not found')
+
           p.write_text(s)
+
       - name: Validate shell syntax
         run: bash -n openlist.sh
+
       - name: Commit migration
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add openlist.sh .github/workflows/toolkit-git-sync-migration.yml
-          git diff --cached --quiet || git commit -m "feat: detect toolkit updates by git commit [toolkit-git-sync]"
+          git add openlist.sh
+          git diff --cached --quiet || git commit -m "feat: use SHA-256 for toolkit sync [toolkit-sha256]"
           git push origin HEAD:main
-# trigger migration
