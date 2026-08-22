@@ -16,7 +16,13 @@ PID_FILE="$HOME_DIR/openlist.pid"
 VERSION_FILE="$HOME_DIR/version"
 VERSION_CACHE="$HOME_DIR/latest-version"
 VERSION_CHECKING="$HOME_DIR/.version-checking"
-SHORTCUT="$HOME/.local/bin/oplist"
+if [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *com.termux* ]]; then
+    SHORTCUT="$PREFIX/bin/oplist"
+    LEGACY_SHORTCUT="$HOME/.local/bin/oplist"
+else
+    SHORTCUT="$HOME/.local/bin/oplist"
+    LEGACY_SHORTCUT=""
+fi
 ARIA2_DIR="$HOME/aria2"
 ARIA2_CONF="$ARIA2_DIR/aria2.conf"
 ARIA2_LOG="$ARIA2_DIR/aria2.log"
@@ -80,20 +86,63 @@ toolkit_remote_code(){ api_get "https://raw.githubusercontent.com/$REPO/main/ope
 toolkit_local_code(){ cat "${BASH_SOURCE[0]}" 2>/dev/null; }
 toolkit_hash(){ printf '%s' "$1" | sha256_of; }
 toolkit_build_id(){ local h; h="$(toolkit_hash "$(toolkit_local_code)")"; [ -n "$h" ] && printf '%s\n' "${h:0:7}" || echo 'dev'; }
+ensure_toolkit_shortcut(){
+    local src="${BASH_SOURCE[0]}"
+    [ -f "$src" ] || return 0
+
+    mkdir -p "$(dirname "$SHORTCUT")" || return 1
+
+    if [ "$(readlink -f "$src" 2>/dev/null)" != "$(readlink -f "$SHORTCUT" 2>/dev/null)" ]; then
+        cp "$src" "$SHORTCUT" 2>/dev/null || return 1
+        chmod +x "$SHORTCUT" 2>/dev/null || return 1
+    fi
+
+    # Termux 旧版可能还残留 ~/.local/bin/oplist。
+    # 如果确认它也是 Toolkit，则同步成当前版本，避免两个入口版本不一致。
+    if [ -n "$LEGACY_SHORTCUT" ] &&
+       [ -f "$LEGACY_SHORTCUT" ] &&
+       grep -q '^# OpenList Toolkit' "$LEGACY_SHORTCUT" 2>/dev/null; then
+        cp "$src" "$LEGACY_SHORTCUT" 2>/dev/null || true
+        chmod +x "$LEGACY_SHORTCUT" 2>/dev/null || true
+    fi
+}
+
 apply_toolkit_code(){
     local remote_content="$1" remote_hash="$2" tmp src
     src="${BASH_SOURCE[0]}"
     tmp="$(mktemp)"
+
     printf '%s\n' "$remote_content" > "$tmp"
-    head -n1 "$tmp" | grep -q '^#!' || { err '云端代码 校验失败，已取消同步。'; rm -f "$tmp"; return 1; }
-    [ "$(wc -c < "$tmp")" -gt 500 ] || { err '云端代码 内容异常，已取消同步。'; rm -f "$tmp"; return 1; }
+
+    head -n1 "$tmp" | grep -q '^#!' || {
+        err '云端代码 校验失败，已取消同步。'
+        rm -f "$tmp"
+        return 1
+    }
+
+    [ "$(wc -c < "$tmp")" -gt 500 ] || {
+        err '云端代码 内容异常，已取消同步。'
+        rm -f "$tmp"
+        return 1
+    }
+
     chmod +x "$tmp"
     cp "$tmp" "$src"
+
     mkdir -p "$(dirname "$SHORTCUT")"
     cp "$tmp" "$SHORTCUT" 2>/dev/null || true
     chmod +x "$SHORTCUT" 2>/dev/null || true
+
+    if [ -n "$LEGACY_SHORTCUT" ] &&
+       [ -f "$LEGACY_SHORTCUT" ] &&
+       grep -q '^# OpenList Toolkit' "$LEGACY_SHORTCUT" 2>/dev/null; then
+        cp "$tmp" "$LEGACY_SHORTCUT" 2>/dev/null || true
+        chmod +x "$LEGACY_SHORTCUT" 2>/dev/null || true
+    fi
+
     rm -f "$tmp"
     printf '%s\n' "$remote_hash" > "$TOOLKIT_SYNCED_HASH_FILE"
+
     ok 'Toolkit 代码已同步为 GitHub main 最新版本。'
 }
 network_status(){
@@ -475,6 +524,7 @@ more(){
     done
 }
 mkdirs
+ensure_toolkit_shortcut || warn 'Toolkit 全局命令入口同步失败，请检查权限或路径。'
 check_version_bg
 if [ "${1:-}" = "--watchdog" ]; then
     while [ -f "$WATCHDOG_ENABLED" ]; do
